@@ -3,12 +3,20 @@
 <head>
     <title>Audio Recorder</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.6.0/jszip.min.js"></script>
+    <link rel="stylesheet" href="style.css">
 </head>
+<link rel='stylesheet' href='https://fonts.googleapis.com/css?family=Roboto'>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
 <body>
-    <button id="startRecord">Start Recording</button>
-    <button id="stopRecord" disabled>Stop Recording</button>
+    <textarea id="text-box" placeholder="Your text goes here..."></textarea>
+    <div id="button-row">
+        <button class="button button-secondary" id="previous-button">Previous</button>
+        <button class="button button-secondary" id="startStopRecord">Start Recording</button>
+        <button class="button button-primary" id="next-button">Next</button>
+    </div>
+    
     <audio id="audioPlayer" controls></audio>
-    <a id="downloadLink" style="display: block">Download</a>
+    <a id="downloadLink" class="download-button">Download</a>
     <script src="script.js"></script>
     <p id="paragraph">
         Simplicity

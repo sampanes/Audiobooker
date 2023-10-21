@@ -1,8 +1,8 @@
-const startRecordButton = document.getElementById('startRecord');
-const stopRecordButton = document.getElementById('stopRecord');
+const startStopRecordButton = document.getElementById('startStopRecord')
 const audioPlayer = document.getElementById('audioPlayer');
 const downloadLink = document.getElementById('downloadLink');
 
+let recordingOngoing = false;
 let mediaRecorder;
 let audioChunks = [];
         const recordedAudioList = []; // Array to store recorded audio data and filenames
@@ -16,44 +16,6 @@ navigator.mediaDevices.getUserMedia({ audio: true })
             }
         };
 
-        // mediaRecorder.onstop = function () {
-        //     const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-        //     const audioUrl = URL.createObjectURL(audioBlob);
-        //     audioPlayer.src = audioUrl;
-        //     downloadLink.href = audioUrl;
-        //     downloadLink.download = 'recorded_audio.wav';
-        //     downloadLink.style.display = 'block';
-        // };
-
-        // mediaRecorder.onstop = function () {
-        //     const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-
-        //     // Create a unique filename based on the current timestamp
-        //     const filename = `recording_${Date.now()}.wav`;
-
-        //     const audioUrl = URL.createObjectURL(audioBlob);
-
-        //     // Create a download link for each recording
-        //     const downloadLink = document.createElement('a');
-        //     downloadLink.href = audioUrl;
-        //     downloadLink.download = filename;
-        //     downloadLink.style.display = 'block';
-
-        //     // Add the download link to the list
-        //     recordedAudioList.push({ filename, downloadLink });
-
-        //     // Create a list item for each recording
-        //     const listItem = document.createElement('li');
-        //     listItem.textContent = filename;
-        //     listItem.appendChild(downloadLink);
-
-        //     // Add the list item to a list (e.g., an <ul> element with id "recordingsList")
-        //     const recordingsList = document.getElementById('recordingsList');
-        //     recordingsList.appendChild(listItem);
-        // };
-
-
-
 mediaRecorder.onstop = function () {
     const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
     const filename = `recording_${Date.now()}.wav`;
@@ -61,17 +23,19 @@ mediaRecorder.onstop = function () {
     // Rest of your code for handling the download links
 };
 
-        startRecordButton.addEventListener('click', () => {
-            mediaRecorder.start();
-            startRecordButton.disabled = true;
-            stopRecordButton.disabled = false;
-        });
-
-        stopRecordButton.addEventListener('click', () => {
-            mediaRecorder.stop();
-            startRecordButton.disabled = false;
-            stopRecordButton.disabled = true;
-        });
+        startStopRecordButton.addEventListener('click', () => {
+            if (recordingOngoing) {
+                console.log("Recording is ongoing and button clicked, stop recording, change text to Start");
+                mediaRecorder.stop();
+                startStopRecordButton.textContent = "Start Recording";
+                toggleRecording(); // If true, set it to false.
+            } else {
+                console.log("Recording is not ongoing and button clicked, start recording, change text to Stop");
+                mediaRecorder.start();
+                startStopRecordButton.textContent = "Stop Recording";
+                toggleRecording(); // If false, set it to true.
+            }
+        })
     })
     .catch(function (error) {
         console.error('Error accessing the microphone:', error);
@@ -100,6 +64,10 @@ createZipButton.addEventListener('click', () => {
     });
 });
 
+// Function to toggle the value of recordingOngoing.
+function toggleRecording() {
+    recordingOngoing = !recordingOngoing; // Toggle the value.
+}
 
 function getSelectedTextRange() {
     const paragraph = document.getElementById("paragraph");

@@ -1,0 +1,57 @@
+body {
+    font-family: Arial, sans-serif;
+    text-align: center;
+}
+
+#text-box {
+    width: 80%;
+    height: 300px;
+    margin: 20px auto;
+    padding: 10px;
+    font-size: 16px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    resize: none;
+}
+
+#button-row {
+    text-align: center;
+    margin: 20px auto;
+}
+
+.button {
+    padding: 10px 20px;
+    font-size: 16px;
+    margin: 0 10px;
+    cursor: pointer;
+    border: none;
+    border-radius: 5px;
+}
+
+.button-primary {
+    background-color: #3498db;
+    color: #fff;
+}
+
+.button-secondary {
+    background-color: #ccc;
+    color: #333;
+}
+
+.download-button {
+    display: inline-block;
+    padding: 10px 20px;
+    background-color: #3498db; /* Button background color */
+    color: #fff; /* Button text color */
+    text-decoration: none;
+    border: none;
+    border-radius: 5px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: background-color 0.3s; /* Add a smooth hover effect */
+
+    /* Optional: Add hover effect */
+    &:hover {
+        background-color: #2980b9; /* Change the background color on hover */
+    }
+}
