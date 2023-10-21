@@ -1,11 +1,12 @@
-const startStopRecordButton = document.getElementById('startStopRecord')
-const audioPlayer = document.getElementById('audioPlayer');
+const startStopRecordButton = document.getElementById('startStopRecord');
 const downloadLink = document.getElementById('downloadLink');
+const createZipButton = document.getElementById('downloadLink');
+const recordedAudioList = []; // Array to store recorded audio data and filenames
 
 let recordingOngoing = false;
 let mediaRecorder;
 let audioChunks = [];
-        const recordedAudioList = []; // Array to store recorded audio data and filenames
+
 navigator.mediaDevices.getUserMedia({ audio: true })
     .then(function (stream) {
         mediaRecorder = new MediaRecorder(stream);
@@ -23,25 +24,23 @@ mediaRecorder.onstop = function () {
     // Rest of your code for handling the download links
 };
 
-        startStopRecordButton.addEventListener('click', () => {
-            if (recordingOngoing) {
-                console.log("Recording is ongoing and button clicked, stop recording, change text to Start");
-                mediaRecorder.stop();
-                startStopRecordButton.textContent = "Start Recording";
-                toggleRecording(); // If true, set it to false.
-            } else {
-                console.log("Recording is not ongoing and button clicked, start recording, change text to Stop");
-                mediaRecorder.start();
-                startStopRecordButton.textContent = "Stop Recording";
-                toggleRecording(); // If false, set it to true.
-            }
-        })
-    })
-    .catch(function (error) {
-        console.error('Error accessing the microphone:', error);
-    });
-
-    const createZipButton = document.getElementById('downloadLink');
+startStopRecordButton.addEventListener('click', () => {
+    if (recordingOngoing) {
+        console.log("Recording is ongoing and button clicked, stop recording, change text to Start");
+        mediaRecorder.stop();
+        startStopRecordButton.textContent = "Start Recording";
+        toggleRecording(); // If true, set it to false.
+    } else {
+        console.log("Recording is not ongoing and button clicked, start recording, change text to Stop");
+        mediaRecorder.start();
+        startStopRecordButton.textContent = "Stop Recording";
+        toggleRecording(); // If false, set it to true.
+    }
+})
+})
+.catch(function (error) {
+console.error('Error accessing the microphone:', error);
+});
 
 createZipButton.addEventListener('click', () => {
     const zip = new JSZip();
