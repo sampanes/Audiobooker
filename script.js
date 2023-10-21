@@ -6,6 +6,8 @@ const recordedAudioList = []; // Array to store recorded audio data and filename
 let recordingOngoing = false;
 let mediaRecorder;
 let audioChunks = [];
+let startTime = 0; // Initialize the start time
+let timerInterval; // Variable to store the interval ID
 
 navigator.mediaDevices.getUserMedia({ audio: true })
     .then(function (stream) {
@@ -24,17 +26,25 @@ mediaRecorder.onstop = function () {
     // Rest of your code for handling the download links
 };
 
+/********************************************
+ *  EVENT LISTENERS
+ ********************************************/
+
 startStopRecordButton.addEventListener('click', () => {
     if (recordingOngoing) {
+        /* WAS GOING, NOW STOPPING */
         console.log("Recording is ongoing and button clicked, stop recording, change text to Start");
         mediaRecorder.stop();
         startStopRecordButton.textContent = "Start Recording";
         toggleRecording(); // If true, set it to false.
+        stopTimer();
     } else {
+        /* WAS NOT GOING, STARTING */
         console.log("Recording is not ongoing and button clicked, start recording, change text to Stop");
         mediaRecorder.start();
         startStopRecordButton.textContent = "Stop Recording";
         toggleRecording(); // If false, set it to true.
+        startTimer();
     }
 })
 })
@@ -62,6 +72,51 @@ createZipButton.addEventListener('click', () => {
         zipLink.click();
     });
 });
+
+/********************************************
+*   FUNCTIONS
+********************************************/
+
+// Function to start the timer
+function startTimer() {
+    startTime = Date.now(); // Record the current time
+    timerInterval = setInterval(updateTimer, 100); // Update the timer every 100 milliseconds for more decimal places
+}
+
+// Function to stop the timer
+function stopTimer() {
+    clearInterval(timerInterval); // Stop the timer
+    const currentTime = Date.now();
+    const elapsedTime = (currentTime - startTime) / 1000; // Calculate elapsed time in seconds with 2 decimal places
+    // Log the total time to a text field (you can customize this element by ID)
+    document.getElementById('totalTime').textContent = `Total Time: ${elapsedTime.toFixed(2)} seconds`;
+
+    const totalTime = elapsedTime.toFixed(2);
+
+    // Get the existing content of the data field
+    const dataField = document.getElementById('dataField');
+    const existingContent = dataField.value;
+
+    // Count the number of lines in the existing content
+    const numberOfLines = existingContent.split('\n').length;
+
+    // Format numberOfLines with leading zeros (e.g., 001, 025, 194)
+    const formattedNumberOfLines = String(numberOfLines).padStart(3, '0');
+
+    // Append the new line with the total time
+    const newContent = existingContent + `${formattedNumberOfLines}: ${totalTime} seconds\n`;
+
+    // Update the data field with the new content
+    dataField.value = newContent;
+}
+
+// Function to update the timer display
+function updateTimer() {
+    const currentTime = Date.now();
+    const elapsedTime = (currentTime - startTime) / 1000; // Calculate elapsed time in seconds with 2 decimal places
+    // Update a text field (you can customize this element by ID)
+    document.getElementById('timerDisplay').textContent = `Time: ${elapsedTime.toFixed(2)} seconds`;
+}
 
 // Function to toggle the value of recordingOngoing.
 function toggleRecording() {
