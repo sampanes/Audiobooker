@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Audio Recorder</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.6.0/jszip.min.js"></script>
+</head>
+<body>
+    <button id="startRecord">Start Recording</button>
+    <button id="stopRecord" disabled>Stop Recording</button>
+    <audio id="audioPlayer" controls></audio>
+    <a id="downloadLink" style="display: block">Download</a>
+    <script src="script.js"></script>
+    <p id="paragraph">
+        Simplicity
+    </p>
+     <button onclick="getSelectedTextRange()">Get Selected Text Range</button>
+    <div id="selectedText"></div>
+</body>
+</html>
