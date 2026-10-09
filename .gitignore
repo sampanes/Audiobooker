@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+
+# Your recordings and local settings stay on this machine
+takes/
+settings.json
+take-recorder.pid

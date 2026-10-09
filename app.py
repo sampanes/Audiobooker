@@ -1,0 +1,641 @@
+"""Take Recorder: sing, keep the good takes, trash the bad ones without stopping."""
+
+import atexit
+import ctypes
+import json
+import os
+import sys
+import tkinter as tk
+from datetime import date
+from pathlib import Path
+from tkinter import messagebox, ttk
+
+import engine
+from takes import Song
+
+HERE = Path(__file__).resolve().parent
+SETTINGS_PATH = HERE / "settings.json"
+PID_PATH = HERE / "take-recorder.pid"
+PROCESS_TITLE = "take-recorder"
+
+DEFAULTS = {
+    "song": "",
+    "input": "1",
+    "samplerate": 48000,
+    "device_match": ["Studio 26c", "PreSonus"],
+    "preroll_seconds": 0.3,
+    "takes_dir": "takes",
+}
+INPUT_CHOICES = {"1": [0], "2": [1], "1+2": [0, 1]}
+SAMPLE_RATES = ("44100", "48000", "96000")
+
+METER_W = 640
+BAR_H = 26
+METER_MIN_DB = -60.0
+DECAY_DB_PER_S = 24.0
+HOLD_S = 1.5
+TICK_MS = 33
+
+C = dict(bg="#1e1f22", panel="#2b2d31", fg="#e6e6e6", dim="#8a8f98", green="#3fb950",
+         yellow="#d29922", red="#f85149", blue="#58a6ff", gold="#e3b341", grey="#5c6370",
+         target="#24382a")
+
+HELP = ("Space  record / stop      G / B  last take good / bad      R  retake      "
+        "Backspace  trash      Ctrl+Z  undo trash      P  play      S  star")
+
+
+def load_settings():
+    settings = dict(DEFAULTS)
+    try:
+        settings.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        pass
+    return settings
+
+
+def save_settings(settings):
+    SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def fmt_time(seconds):
+    m, s = divmod(seconds, 60)
+    return f"{int(m):02d}:{s:04.1f}"
+
+
+def db_to_x(db):
+    frac = (db - METER_MIN_DB) / -METER_MIN_DB
+    return max(0.0, min(1.0, frac)) * METER_W
+
+
+class App:
+    def __init__(self, root, settings):
+        self.root = root
+        self.settings = settings
+        self.takes_root = (HERE / settings["takes_dir"]).resolve()
+        self.song = Song(self.takes_root, settings["song"] or date.today().isoformat())
+        self.engine = engine.Engine(settings["device_match"], settings["samplerate"],
+                                    settings["preroll_seconds"])
+        self.current_num = None
+        self.last_recorded = None
+        self._flash = None
+        self.playing_num = None
+        self.undo_stack = []
+        self.display_db = [METER_MIN_DB] * engine.METER_CHANNELS
+        self.hold_db = [METER_MIN_DB] * engine.METER_CHANNELS
+        self.hold_age = [0.0] * engine.METER_CHANNELS
+        self.clipped = False
+
+        self._build()
+        self._bind_keys()
+        self.engine.set_channels(INPUT_CHOICES[self.input_var.get()])
+        self.connect()
+        self.refresh_takes()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.after(TICK_MS, self.tick)
+
+    # ---- layout ---------------------------------------------------------
+
+    def _build(self):
+        root = self.root
+        root.title("Take Recorder")
+        root.configure(bg=C["bg"])
+        root.minsize(720, 560)
+
+        style = ttk.Style(root)
+        style.theme_use("clam")
+        style.configure(".", background=C["bg"], foreground=C["fg"], fieldbackground=C["panel"])
+        style.configure("Treeview", background=C["panel"], fieldbackground=C["panel"],
+                        foreground=C["fg"], rowheight=26, font=("Segoe UI", 11))
+        style.configure("Treeview.Heading", background=C["bg"], foreground=C["dim"],
+                        font=("Segoe UI", 10, "bold"))
+        style.map("Treeview", background=[("selected", "#3b4252")])
+        style.configure("TButton", background=C["panel"], foreground=C["fg"], padding=(10, 6))
+        style.map("TButton", background=[("active", "#3b4252"), ("disabled", C["bg"])])
+        style.configure("TRadiobutton", background=C["bg"], foreground=C["fg"])
+        style.map("TRadiobutton", background=[("disabled", C["bg"]), ("active", C["bg"])],
+                  foreground=[("disabled", C["dim"])])
+        style.configure("TCheckbutton", background=C["bg"], foreground=C["fg"])
+        style.configure("TCombobox", fieldbackground=C["panel"], foreground=C["fg"],
+                        background=C["panel"], arrowcolor=C["fg"])
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", C["panel"]), ("disabled", C["bg"])],
+                  foreground=[("readonly", C["fg"]), ("disabled", C["dim"])],
+                  selectbackground=[("readonly", C["panel"])],
+                  selectforeground=[("readonly", C["fg"])])
+
+        pad = dict(padx=14)
+
+        # Song + input selection
+        top = tk.Frame(root, bg=C["bg"])
+        top.pack(fill="x", pady=(12, 6), **pad)
+        tk.Label(top, text="Song", bg=C["bg"], fg=C["dim"], font=("Segoe UI", 10)).pack(side="left")
+        self.song_var = tk.StringVar(value=self.song.name)
+        self.song_entry = tk.Entry(top, textvariable=self.song_var, width=28, bg=C["panel"],
+                                   fg=C["fg"], insertbackground=C["fg"], relief="flat",
+                                   disabledbackground=C["panel"], disabledforeground=C["dim"],
+                                   font=("Segoe UI", 12))
+        self.song_entry.pack(side="left", padx=(8, 6), ipady=3)
+        self.song_entry.bind("<Return>", self.on_song_enter)
+        self.song_entry.bind("<Escape>", self.on_song_escape)
+        ttk.Button(top, text="Open folder", takefocus=0, command=self.open_folder).pack(side="left")
+
+        self.rate_var = tk.StringVar(value=str(self.settings["samplerate"]))
+        self.rate_box = ttk.Combobox(top, textvariable=self.rate_var, values=SAMPLE_RATES,
+                                     width=7, state="readonly", takefocus=0)
+        self.rate_box.pack(side="right")
+        self.rate_box.bind("<<ComboboxSelected>>", self.on_rate)
+        tk.Label(top, text="Hz", bg=C["bg"], fg=C["dim"]).pack(side="right", padx=(10, 4))
+        self.input_var = tk.StringVar(value=self.settings["input"]
+                                      if self.settings["input"] in INPUT_CHOICES else "1")
+        self.input_buttons = []
+        for label in reversed(list(INPUT_CHOICES)):
+            b = ttk.Radiobutton(top, text=label, value=label, variable=self.input_var,
+                                takefocus=0, command=self.on_input)
+            b.pack(side="right", padx=2)
+            self.input_buttons.append(b)
+        tk.Label(top, text="Record input", bg=C["bg"], fg=C["dim"]).pack(side="right", padx=(0, 4))
+
+        # Meter
+        meter_frame = tk.Frame(root, bg=C["bg"])
+        meter_frame.pack(fill="x", pady=(6, 0), **pad)
+        self.meter = tk.Canvas(meter_frame, width=METER_W + 130,
+                               height=BAR_H * engine.METER_CHANNELS + 30,
+                               bg=C["bg"], highlightthickness=0)
+        self.meter.pack(side="left")
+        self._build_meter()
+        self.clip_label = tk.Label(meter_frame, text="CLIP", width=6, bg=C["panel"], fg=C["dim"],
+                                   font=("Segoe UI", 12, "bold"), cursor="hand2")
+        self.clip_label.pack(side="left", padx=(10, 0), ipady=8)
+        self.clip_label.bind("<Button-1>", lambda e: self.reset_clip())
+        tk.Label(root, text="Aim for loudest peaks inside the shaded zone (-18 to -6 dBFS). "
+                            "Set gain on the 26c, not here.",
+                 bg=C["bg"], fg=C["dim"], font=("Segoe UI", 9)).pack(anchor="w", **pad)
+
+        # Big status
+        self.status = tk.Label(root, text="", bg=C["panel"], fg=C["fg"],
+                               font=("Segoe UI", 26, "bold"), pady=10)
+        self.status.pack(fill="x", pady=(10, 6), **pad)
+
+        # Verdict on the take just recorded
+        verdict = tk.Frame(root, bg=C["bg"])
+        verdict.pack(fill="x", pady=(0, 10), **pad)
+        self.verdict_label = tk.Label(verdict, text="", bg=C["bg"], fg=C["dim"], anchor="w",
+                                      font=("Segoe UI", 12))
+        self.verdict_label.pack(side="left", fill="x", expand=True)
+        self.verdict_buttons = []
+        for text, color, cmd in (("BAD  (B)", C["red"], self.mark_bad),
+                                 ("GOOD  (G)", C["green"], self.mark_good)):
+            b = tk.Button(verdict, text=text, command=cmd, takefocus=0, width=12,
+                          font=("Segoe UI", 15, "bold"), bg=color, fg="#0d1117",
+                          activebackground=C["fg"], disabledforeground="#3a3d44",
+                          relief="flat", cursor="hand2")
+            b.pack(side="right", padx=(8, 0), ipady=4)
+            self.verdict_buttons.append(b)
+
+        # Buttons
+        bar = tk.Frame(root, bg=C["bg"])
+        bar.pack(fill="x", **pad)
+        self.buttons = {}
+        for key, text, cmd in (
+                ("rec", "Record (Space)", self.toggle_record),
+                ("retake", "Retake (R)", self.retake),
+                ("trash", "Trash (Bksp)", self.trash),
+                ("undo", "Undo trash (Ctrl+Z)", self.undo_trash),
+                ("play", "Play (P)", self.toggle_play),
+                ("star", "Star (S)", self.toggle_star)):
+            b = ttk.Button(bar, text=text, takefocus=0, command=cmd)
+            b.pack(side="left", padx=(0, 6))
+            self.buttons[key] = b
+        self.show_trash = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Show trash", variable=self.show_trash, takefocus=0,
+                        command=self.on_show_trash).pack(side="right")
+
+        # Takes list
+        cols = ("take", "length", "peak", "notes")
+        self.tree = ttk.Treeview(root, columns=cols, show="headings", selectmode="browse")
+        for col, text, width, anchor in (("take", "Take", 70, "center"),
+                                         ("length", "Length", 90, "center"),
+                                         ("peak", "Peak dBFS", 100, "center"),
+                                         ("notes", "Notes", 380, "w")):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor=anchor, stretch=(col == "notes"))
+        self.tree.tag_configure("trashed", foreground=C["grey"])
+        self.tree.tag_configure("starred", foreground=C["gold"])
+        self.tree.tag_configure("bad", foreground=C["red"])
+        self.tree.pack(fill="both", expand=True, pady=(10, 6), **pad)
+        self.tree.bind("<Double-1>", lambda e: self.toggle_play())
+
+        tk.Label(root, text=HELP, bg=C["bg"], fg=C["dim"], font=("Segoe UI", 9)).pack(**pad)
+
+        # Device status
+        foot = tk.Frame(root, bg=C["bg"])
+        foot.pack(fill="x", pady=(4, 10), **pad)
+        self.device_label = tk.Label(foot, text="", bg=C["bg"], fg=C["dim"], anchor="w",
+                                     justify="left", font=("Segoe UI", 9))
+        self.device_label.pack(side="left", fill="x", expand=True)
+        ttk.Button(foot, text="Reconnect", takefocus=0, command=self.connect).pack(side="right")
+
+    def _build_meter(self):
+        cv = self.meter
+        self.bars = []
+        for ch in range(engine.METER_CHANNELS):
+            y0 = ch * BAR_H + 2
+            y1 = y0 + BAR_H - 6
+            cv.create_rectangle(0, y0, METER_W, y1, fill=C["panel"], width=0)
+            cv.create_rectangle(db_to_x(-18), y0, db_to_x(-6), y1, fill=C["target"], width=0)
+            level = cv.create_rectangle(0, y0, 0, y1, fill=C["green"], width=0)
+            hold = cv.create_line(0, y0, 0, y1, fill=C["fg"], width=2)
+            name = cv.create_text(METER_W + 10, (y0 + y1) / 2, anchor="w", fill=C["dim"],
+                                  font=("Segoe UI", 10, "bold"), text=f"IN {ch + 1}")
+            value = cv.create_text(METER_W + 125, (y0 + y1) / 2, anchor="e", fill=C["fg"],
+                                   font=("Consolas", 11), text="-inf")
+            self.bars.append((level, hold, name, value, y0, y1))
+        y = engine.METER_CHANNELS * BAR_H + 4
+        for db in (-48, -36, -24, -18, -12, -6, -3, 0):
+            x = db_to_x(db)
+            cv.create_line(x, y - 4, x, y, fill=C["dim"])
+            cv.create_text(x, y + 2, anchor="n", fill=C["dim"], font=("Segoe UI", 8), text=str(db))
+
+    def _bind_keys(self):
+        for seq, fn in (("<space>", self.toggle_record),
+                        ("<KeyPress-r>", self.retake), ("<KeyPress-R>", self.retake),
+                        ("<BackSpace>", self.trash), ("<Delete>", self.trash),
+                        ("<Control-z>", self.undo_trash), ("<Control-Z>", self.undo_trash),
+                        ("<KeyPress-p>", self.toggle_play), ("<KeyPress-P>", self.toggle_play),
+                        ("<Return>", self.toggle_play),
+                        ("<KeyPress-s>", self.toggle_star), ("<KeyPress-S>", self.toggle_star),
+                        ("<KeyPress-g>", self.mark_good), ("<KeyPress-G>", self.mark_good),
+                        ("<KeyPress-b>", self.mark_bad), ("<KeyPress-B>", self.mark_bad),
+                        ("<Escape>", self.stop_playback)):
+            self.root.bind_all(seq, self._hotkey(fn))
+
+    def _hotkey(self, fn):
+        def handler(event):
+            if isinstance(event.widget, (tk.Entry, ttk.Entry)):
+                return None  # typing a song name
+            fn()
+            return "break"
+        return handler
+
+    # ---- device -----------------------------------------------------------
+
+    def connect(self):
+        if self.engine.recording:
+            self.finish_take()
+        self.engine.stop_playback()
+        self.engine.open()
+        self._update_device_label()
+
+    def _update_device_label(self):
+        b = self.engine.backend
+        if self.engine.input_paused:
+            self.device_label.config(
+                text="Input paused during playback (the 26c can't run input and output at "
+                     "different rates).\nTo avoid this, set both 26c devices to 24-bit "
+                     f"{self.engine.samplerate} Hz in Windows Sound settings.", fg=C["yellow"])
+            return
+        if b is None:
+            self.device_label.config(text=self.engine.error or "No interface", fg=C["red"])
+            return
+        quality = ("bit-perfect" if b.bit_perfect
+                   else "NOT bit-perfect -- Windows is processing the signal")
+        self.device_label.config(
+            text=f"{b.describe()}  |  {self.engine.samplerate} Hz / 24-bit WAV  |  {quality}\n"
+                 f"Playback: {self.engine.output_name()}   |   Takes: {self.song.dir}",
+            fg=C["green"] if b.bit_perfect else C["yellow"])
+
+    # ---- song / settings --------------------------------------------------
+
+    def on_song_enter(self, event=None):
+        name = self.song_var.get().strip()
+        if name and not self.engine.recording:
+            self.song = Song(self.takes_root, name)
+            self.undo_stack.clear()
+            self.last_recorded = None
+            self.settings["song"] = self.song.name
+            save_settings(self.settings)
+            self.refresh_takes()
+            self._update_device_label()
+        self.song_var.set(self.song.name)
+        self.root.focus_set()
+        return "break"
+
+    def on_song_escape(self, event=None):
+        self.song_var.set(self.song.name)
+        self.root.focus_set()
+        return "break"
+
+    def on_input(self):
+        self.engine.set_channels(INPUT_CHOICES[self.input_var.get()])
+        self.settings["input"] = self.input_var.get()
+        save_settings(self.settings)
+        self.root.focus_set()
+
+    def on_rate(self, event=None):
+        rate = int(self.rate_var.get())
+        if self.engine.recording or rate == self.engine.samplerate:
+            self.rate_var.set(str(self.engine.samplerate))
+            self.root.focus_set()
+            return
+        self.settings["samplerate"] = rate
+        save_settings(self.settings)
+        self.engine.close()
+        self.engine = engine.Engine(self.settings["device_match"], rate,
+                                    self.settings["preroll_seconds"])
+        self.engine.set_channels(INPUT_CHOICES[self.input_var.get()])
+        self.connect()
+        self.root.focus_set()
+
+    def on_show_trash(self):
+        self.refresh_takes()
+        self.root.focus_set()
+
+    def open_folder(self):
+        os.startfile(self.song.dir)
+
+    # ---- takes -------------------------------------------------------------
+
+    def target_take(self):
+        """The selected take, else the newest take that isn't trashed."""
+        sel = self.tree.selection()
+        if sel:
+            return self.song.get(int(sel[0]))
+        live = [t for t in self.song.takes() if not t.trashed]
+        return live[-1] if live else None
+
+    def toggle_record(self):
+        if self.engine.recording:
+            self.finish_take()
+            return
+        self.stop_playback()
+        if self.engine.backend is None or self.engine.lost:
+            self.flash("Interface not connected -- click Reconnect")
+            return
+        num, path = self.song.next_path()
+        try:
+            self.engine.start_take(str(path))
+        except Exception as exc:
+            messagebox.showerror("Take Recorder", f"Could not start take:\n{exc}")
+            return
+        self.current_num = num
+        self.reset_clip()
+        self._set_recording_ui(True)
+
+    def finish_take(self):
+        result = self.engine.stop_take()
+        num, self.current_num = self.current_num, None
+        self._set_recording_ui(False)
+        if result is None:
+            return None
+        self.song.record(num, result.seconds, result.peak_db, result.clipped, result.dropouts)
+        if result.error:
+            messagebox.showerror("Take Recorder", f"Take {num:03d} hit a disk error:\n{result.error}")
+        self.last_recorded = num
+        self.refresh_takes(select=num)
+        return num
+
+    def _set_recording_ui(self, recording):
+        state = "disabled" if recording else "normal"
+        self.song_entry.config(state=state)
+        self.rate_box.config(state="disabled" if recording else "readonly")
+        for b in self.input_buttons:
+            b.config(state=state)
+        self.buttons["rec"].config(text="Stop (Space)" if recording else "Record (Space)")
+        self.buttons["trash"].config(text="Abort take (Bksp)" if recording else "Trash (Bksp)")
+        self._update_verdict()
+
+    def retake(self):
+        if self.engine.recording:
+            num = self.finish_take()
+            if num is not None:
+                self._trash_num(num)
+        elif self.last_recorded is not None:
+            self._trash_num(self.last_recorded)
+        self.toggle_record()
+
+    def trash(self):
+        if self.engine.recording:
+            num = self.finish_take()
+            if num is not None:
+                self._trash_num(num)
+            return
+        take = self.target_take()
+        if take is None or take.trashed:
+            return
+        if self.playing_num == take.num:
+            self.stop_playback()
+        self._trash_num(take.num)
+
+    def _verdict_take(self):
+        """G/B act on the take being recorded (stopping it) or the one just recorded."""
+        if self.engine.recording:
+            return self.finish_take()
+        return self.last_recorded
+
+    def mark_good(self):
+        num = self._verdict_take()
+        if num is None:
+            return
+        self.song.set_star(num, True)
+        self.flash(f"Take {num:03d}  GOOD")
+        self.refresh_takes(select=num)
+
+    def mark_bad(self):
+        num = self._verdict_take()
+        if num is None:
+            return
+        if self.playing_num == num:
+            self.stop_playback()
+        self.song.set_star(num, False)
+        self._trash_num(num)
+        self.flash(f"Take {num:03d}  BAD -- trashed  (Ctrl+Z to undo)")
+
+    def _update_verdict(self):
+        if self.engine.recording:
+            text, fg, state = (f"Recording take {self.current_num:03d}  --  "
+                               "G keeps it, B scraps it", C["fg"], "normal")
+        elif self.last_recorded is not None:
+            take = self.song.get(self.last_recorded)
+            mark = "  GOOD" if take is not None and take.starred else ""
+            text, fg, state = f"Last take {self.last_recorded:03d}{mark}", C["fg"], "normal"
+        else:
+            text, fg, state = "No take to judge yet", C["dim"], "disabled"
+        self.verdict_label.config(text=text, fg=fg)
+        for b, color in zip(self.verdict_buttons, (C["red"], C["green"])):
+            b.config(state=state, bg=color if state == "normal" else C["panel"])
+
+    def _trash_num(self, num):
+        if num == self.last_recorded:
+            self.last_recorded = None
+        if self.song.trash(num):
+            self.undo_stack.append(num)
+            self.flash(f"Take {num:03d} trashed  (Ctrl+Z to undo)")
+        self.tree.selection_set(())
+        self.refresh_takes()
+
+    def undo_trash(self):
+        while self.undo_stack:
+            num = self.undo_stack.pop()
+            if self.song.restore(num):
+                newest = max(t.num for t in self.song.takes())
+                if num == newest:
+                    self.last_recorded = num  # undoing a BAD makes it judgeable again
+                self.flash(f"Take {num:03d} restored")
+                self.refresh_takes(select=num)
+                return
+
+    def toggle_star(self):
+        take = self.target_take()
+        if take is not None:
+            self.song.toggle_star(take.num)
+            self.refresh_takes(select=take.num)
+
+    def refresh_takes(self, select=None):
+        keep = select if select is not None else (
+            int(self.tree.selection()[0]) if self.tree.selection() else None)
+        self.tree.delete(*self.tree.get_children())
+        for t in reversed(self.song.takes()):
+            if t.trashed and not self.show_trash.get():
+                continue
+            notes = []
+            if t.starred:
+                notes.append("* KEEPER")
+            if t.clipped:
+                notes.append("CLIPPED")
+            if t.dropouts:
+                notes.append(f"DROPOUT x{t.dropouts}")
+            if t.trashed:
+                notes.append("(trash)")
+            tag = "trashed" if t.trashed else "bad" if (t.clipped or t.dropouts) else \
+                "starred" if t.starred else ""
+            peak = f"{t.peak_db:.1f}" if t.peak_db > -199 else "--"
+            self.tree.insert("", "end", iid=str(t.num), tags=(tag,),
+                             values=(t.label, fmt_time(t.seconds), peak, "   ".join(notes)))
+        if keep is not None and self.tree.exists(str(keep)):
+            self.tree.selection_set(str(keep))
+            self.tree.see(str(keep))
+        self._update_verdict()
+
+    # ---- playback ------------------------------------------------------------
+
+    def toggle_play(self):
+        if self.engine.recording:
+            return
+        take = self.target_take()
+        if take is None:
+            return
+        if self.playing_num == take.num:
+            self.stop_playback()
+            return
+        try:
+            self.engine.play(str(take.path))
+        except Exception as exc:
+            self._update_device_label()
+            messagebox.showerror("Take Recorder", f"Could not play take {take.label}:\n{exc}")
+            return
+        self.playing_num = take.num
+        self._update_device_label()
+
+    def stop_playback(self):
+        paused = self.engine.input_paused
+        self.engine.stop_playback()
+        self.playing_num = None
+        if paused:
+            self._update_device_label()
+
+    # ---- meter / status -----------------------------------------------------
+
+    def reset_clip(self):
+        self.clipped = False
+        self.clip_label.config(bg=C["panel"], fg=C["dim"])
+
+    def flash(self, text):
+        self._flash = (text, 2.0)
+
+    def tick(self):
+        dt = TICK_MS / 1000
+        peaks = self.engine.take_peaks()
+        selected = INPUT_CHOICES[self.input_var.get()]
+        for ch, (level, hold, name, value, y0, y1) in enumerate(self.bars):
+            active = ch < self.engine.input_count
+            db = engine.to_dbfs(peaks[ch]) if active else METER_MIN_DB
+            self.display_db[ch] = max(db, self.display_db[ch] - DECAY_DB_PER_S * dt)
+            self.hold_age[ch] += dt
+            if db >= self.hold_db[ch] or self.hold_age[ch] > HOLD_S:
+                self.hold_db[ch] = db
+                self.hold_age[ch] = 0.0
+            shown = self.display_db[ch]
+            color = C["red"] if shown > -1 else C["yellow"] if shown > -6 else C["green"]
+            self.meter.coords(level, 0, y0, db_to_x(shown), y1)
+            self.meter.itemconfig(level, fill=color)
+            hx = db_to_x(self.hold_db[ch])
+            self.meter.coords(hold, hx, y0, hx, y1)
+            self.meter.itemconfig(name, fill=C["fg"] if ch in selected else C["dim"])
+            self.meter.itemconfig(value, text=f"{self.hold_db[ch]:6.1f}"
+                                  if self.hold_db[ch] > METER_MIN_DB else "-inf")
+            if active and peaks[ch] >= engine.CLIP_LEVEL and not self.clipped:
+                self.clipped = True
+                self.clip_label.config(bg=C["red"], fg="white")
+
+        if self.engine.lost:
+            if self.engine.recording:
+                num = self.finish_take()
+                messagebox.showwarning("Take Recorder",
+                                       f"The interface disconnected. Take {num:03d} was saved up "
+                                       f"to that point. Click Reconnect when it's back.")
+            self.engine.backend = None
+            self.engine.error = "Interface disconnected -- click Reconnect"
+            self.engine.lost = False
+            self._update_device_label()
+
+        player = self.engine.player
+        if self.playing_num is not None and (player is None or not player.active):
+            self.stop_playback()
+
+        flash = self._flash
+        if self.engine.recording:
+            self.status.config(text=f"REC   take {self.current_num:03d}   "
+                                    f"{fmt_time(self.engine.take_seconds())}",
+                               bg=C["red"], fg="white")
+        elif self.playing_num is not None and player is not None:
+            self.status.config(text=f"PLAY   take {self.playing_num:03d}   "
+                                    f"{fmt_time(player.seconds)} / {fmt_time(player.length)}",
+                               bg=C["blue"], fg="#0d1117")
+        elif flash and flash[1] > 0:
+            self.status.config(text=flash[0], bg=C["panel"], fg=C["gold"])
+            self._flash = (flash[0], flash[1] - dt)
+        elif self.engine.backend is None:
+            self.status.config(text="NO INTERFACE", bg=C["panel"], fg=C["red"])
+        else:
+            self.status.config(text="READY   Space to record", bg=C["panel"], fg=C["fg"])
+
+        self.root.after(TICK_MS, self.tick)
+
+    def on_close(self):
+        if self.engine.recording:
+            self.finish_take()
+        self.engine.stop_playback()
+        self.engine.close()
+        self.settings["song"] = self.song.name
+        save_settings(self.settings)
+        self.root.destroy()
+
+
+def main():
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.kernel32.SetConsoleTitleW(PROCESS_TITLE)
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            pass
+    PID_PATH.write_text(str(os.getpid()), encoding="ascii")
+    atexit.register(lambda: PID_PATH.unlink(missing_ok=True))
+    print(f"[{PROCESS_TITLE}] pid {os.getpid()} -- close the window or run stop.bat to quit")
+
+    root = tk.Tk()
+    App(root, load_settings())
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
