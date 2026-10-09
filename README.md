@@ -39,7 +39,36 @@ Nothing is ever deleted: trashed takes move to `takes/<song>/trash/`. Take
 numbers are never reused, so `take_007.wav` always means the same take.
 
 Each take starts 0.3 s *before* you press Space (pre-roll), so the breath or
-pickup isn't cut off.
+pickup isn't cut off. (Takes over a backing track use the count-in instead.)
+
+## Singing over a backing track
+
+1. **Load...** a track (WAV, MP3, FLAC, OGG or AIFF). It is copied into the
+   song folder, so the folder holds everything for that song.
+2. Set **Start at** (e.g. `1:05` to work on the second verse) and **Count-in**
+   (seconds of track you hear before that point).
+3. Press Space. The track plays in your headphones from the count-in; the
+   status bar counts down, then shows where you are in the track. The take
+   stops by itself when the track ends.
+
+Takes are saved **on the track's timeline**: the WAV starts with silence up to
+where you began singing, so dropping the track and any take into FL Studio (or
+any DAW) at 0:00 lines them up. Playing a take back (P) plays it over the
+track. Untick **Play while recording** to record dry for a moment.
+
+**Calibrate once.** The app can measure when the track left the computer and
+when your voice arrived, but not the time spent inside the interface and its
+converters. Click **Calibrate**, hold one headphone ear cup against the mic,
+and it plays 8 clicks and measures the true delay. Redo it if you change the
+interface, headphones, or the Hz setting. Until then the latency shows "not
+calibrated" and takes may sit a few milliseconds late.
+
+## Crash safety
+
+Audio is written to disk as you sing. If the app, Windows or the power dies
+mid-take, the WAV is left with a header that says "empty" -- the next time the
+song is opened, the app repairs the header, rebuilds the take's stats and
+marks it `RECOVERED` in the list.
 
 ## Getting the best sound
 
@@ -49,13 +78,15 @@ pickup isn't cut off.
   -0.1 dBFS -- click it to reset.
 - **Monitoring:** listen through the interface's hardware monitor/mix knob.
   It is zero-latency; the app does no software monitoring.
-- **Windows format (recommended):** in Sound settings (`mmsys.cpl`), set both
-  the interface's playback and recording devices to 24 bit at the same sample
-  rate the app uses (48000 Hz by default) under Properties -> Advanced. The
-  interface runs one clock for input and output, so if Windows' output is at a
-  different rate, the app has to pause the input meter while playing a take back.
-  Keep "Allow applications to take exclusive control" checked on the
-  recording device.
+- **Sample rate:** leave Hz on `auto`. The interface runs one clock for
+  input and output, so the app records at whatever rate Windows runs the
+  interface at (Sound settings, `mmsys.cpl` -> device -> Advanced); that is
+  what lets the track play while the mic is held exclusively. 44.1 and 48 kHz
+  at 24-bit are both full quality. A fixed rate that differs from Windows
+  works for dry takes, but the input pauses during playback and backing
+  tracks can't play. If you change the Windows format, click Reconnect.
+- Keep "Allow applications to take exclusive control" checked on the
+  interface's recording device in Windows Sound settings.
 - **Dropout flag:** a take marked `DROPOUT` lost audio (the computer couldn't
   keep up). Redo it.
 - **Cloudlifter-style inline preamps** run on the interface's 48V phantom power
@@ -71,17 +102,22 @@ pickup isn't cut off.
 |-------------------|-------------------------------|--------------------------------------------|
 | `song`            | today's date                  | Current song folder                        |
 | `input`           | `"1"`                         | Record input `1`, `2`, or `1+2` (stereo)   |
-| `samplerate`      | `48000`                       | 44100 / 48000 / 96000                      |
+| `samplerate`      | `"auto"`                      | `auto` (match Windows) or 44100 / 48000 / 96000 |
 | `device_match`    | `["Studio 26c", "PreSonus"]`  | Substrings that identify your interface    |
 | `preroll_seconds` | `0.3`                         | Audio kept from before you press Space     |
 | `takes_dir`       | `"takes"`                     | Where song folders go (relative or absolute) |
+| `latency_ms`      | `null`                        | Set by Calibrate                           |
+| `track_gain`      | `0.7`                         | Track level under the vocal when playing back |
+
+Per-song track settings (track file, start point, count-in) live in
+`takes/<song>/song.json`; per-take details in `takes/<song>/takes.json`.
 
 ## Layout
 
 ```
 app.py       Tkinter window, hotkeys, meter
-engine.py    Input stream, take writer, playback
-takes.py     Song folders, trash/restore, take metadata (takes.json)
+engine.py    Input stream, take writer, backing track + alignment, playback
+takes.py     Song folders, trash/restore, take metadata, crash recovery
 tests/       python -m unittest discover -s tests -t .
 ```
 

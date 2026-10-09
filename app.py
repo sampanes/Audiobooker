@@ -6,12 +6,15 @@ import json
 import os
 import sys
 import tkinter as tk
+import traceback
 from datetime import date
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
+
+import soundfile as sf
 
 import engine
-from takes import Song
+from takes import TRACK_EXTENSIONS, Song
 
 HERE = Path(__file__).resolve().parent
 SETTINGS_PATH = HERE / "settings.json"
@@ -21,13 +24,15 @@ PROCESS_TITLE = "take-recorder"
 DEFAULTS = {
     "song": "",
     "input": "1",
-    "samplerate": 48000,
+    "samplerate": "auto",
     "device_match": ["Studio 26c", "PreSonus"],
     "preroll_seconds": 0.3,
     "takes_dir": "takes",
+    "latency_ms": None,
+    "track_gain": 0.7,
 }
 INPUT_CHOICES = {"1": [0], "2": [1], "1+2": [0, 1]}
-SAMPLE_RATES = ("44100", "48000", "96000")
+SAMPLE_RATES = ("auto", "44100", "48000", "96000")
 
 METER_W = 640
 BAR_H = 26
@@ -42,6 +47,15 @@ C = dict(bg="#1e1f22", panel="#2b2d31", fg="#e6e6e6", dim="#8a8f98", green="#3fb
 
 HELP = ("Space  record / stop      G / B  last take good / bad      R  retake      "
         "Backspace  trash      Ctrl+Z  undo trash      P  play      S  star")
+
+CALIBRATE_HELP = (
+    "This measures the delay between the backing track and your recording, so takes "
+    "line up with the beat.\n\n"
+    "1. Hold one headphone ear cup right against the mic (touching the grille).\n"
+    "2. Set the headphone volume to a normal listening level.\n"
+    "3. Click OK and keep still and quiet for about 6 seconds -- you'll hear 8 clicks.\n\n"
+    "You only need to do this once per setup (redo it if you change interface, "
+    "headphones or the Hz setting).")
 
 
 def load_settings():
@@ -58,8 +72,26 @@ def save_settings(settings):
 
 
 def fmt_time(seconds):
-    m, s = divmod(seconds, 60)
+    m, s = divmod(max(seconds, 0.0), 60)
     return f"{int(m):02d}:{s:04.1f}"
+
+
+def fmt_clock(seconds):
+    m, s = divmod(int(round(max(seconds, 0.0))), 60)
+    return f"{m}:{s:02d}"
+
+
+def parse_clock(text):
+    """'1:05', '1:05.5' or '65' -> seconds. Raises ValueError."""
+    parts = text.strip().split(":")
+    if not 1 <= len(parts) <= 2 or not parts[-1]:
+        raise ValueError(text)
+    seconds = float(parts[-1])
+    if len(parts) == 2:
+        seconds += 60 * int(parts[0] or 0)
+    if seconds < 0:
+        raise ValueError(text)
+    return seconds
 
 
 def db_to_x(db):
@@ -72,11 +104,14 @@ class App:
         self.root = root
         self.settings = settings
         self.takes_root = (HERE / settings["takes_dir"]).resolve()
-        self.song = Song(self.takes_root, settings["song"] or date.today().isoformat())
         self.engine = engine.Engine(settings["device_match"], settings["samplerate"],
                                     settings["preroll_seconds"])
+        self.song = Song(self.takes_root, settings["song"] or date.today().isoformat())
+        self.track_data = None
         self.current_num = None
+        self.current_cue = None
         self.last_recorded = None
+        self.calibration = None
         self._flash = None
         self.playing_num = None
         self.undo_stack = []
@@ -89,7 +124,7 @@ class App:
         self._bind_keys()
         self.engine.set_channels(INPUT_CHOICES[self.input_var.get()])
         self.connect()
-        self.refresh_takes()
+        self._open_song_extras()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(TICK_MS, self.tick)
 
@@ -99,7 +134,7 @@ class App:
         root = self.root
         root.title("Take Recorder")
         root.configure(bg=C["bg"])
-        root.minsize(720, 560)
+        root.minsize(760, 600)
 
         style = ttk.Style(root)
         style.theme_use("clam")
@@ -111,10 +146,13 @@ class App:
         style.map("Treeview", background=[("selected", "#3b4252")])
         style.configure("TButton", background=C["panel"], foreground=C["fg"], padding=(10, 6))
         style.map("TButton", background=[("active", "#3b4252"), ("disabled", C["bg"])])
+        style.configure("Small.TButton", padding=(6, 2))
         style.configure("TRadiobutton", background=C["bg"], foreground=C["fg"])
         style.map("TRadiobutton", background=[("disabled", C["bg"]), ("active", C["bg"])],
                   foreground=[("disabled", C["dim"])])
         style.configure("TCheckbutton", background=C["bg"], foreground=C["fg"])
+        style.map("TCheckbutton", background=[("disabled", C["bg"]), ("active", C["bg"])],
+                  foreground=[("disabled", C["dim"])])
         style.configure("TCombobox", fieldbackground=C["panel"], foreground=C["fg"],
                         background=C["panel"], arrowcolor=C["fg"])
         style.map("TCombobox",
@@ -124,16 +162,16 @@ class App:
                   selectforeground=[("readonly", C["fg"])])
 
         pad = dict(padx=14)
+        entry_opts = dict(bg=C["panel"], fg=C["fg"], insertbackground=C["fg"], relief="flat",
+                          disabledbackground=C["panel"], disabledforeground=C["dim"])
 
         # Song + input selection
         top = tk.Frame(root, bg=C["bg"])
-        top.pack(fill="x", pady=(12, 6), **pad)
+        top.pack(fill="x", pady=(12, 4), **pad)
         tk.Label(top, text="Song", bg=C["bg"], fg=C["dim"], font=("Segoe UI", 10)).pack(side="left")
         self.song_var = tk.StringVar(value=self.song.name)
-        self.song_entry = tk.Entry(top, textvariable=self.song_var, width=28, bg=C["panel"],
-                                   fg=C["fg"], insertbackground=C["fg"], relief="flat",
-                                   disabledbackground=C["panel"], disabledforeground=C["dim"],
-                                   font=("Segoe UI", 12))
+        self.song_entry = tk.Entry(top, textvariable=self.song_var, width=28,
+                                   font=("Segoe UI", 12), **entry_opts)
         self.song_entry.pack(side="left", padx=(8, 6), ipady=3)
         self.song_entry.bind("<Return>", self.on_song_enter)
         self.song_entry.bind("<Escape>", self.on_song_escape)
@@ -154,6 +192,39 @@ class App:
             b.pack(side="right", padx=2)
             self.input_buttons.append(b)
         tk.Label(top, text="Record input", bg=C["bg"], fg=C["dim"]).pack(side="right", padx=(0, 4))
+
+        # Backing track
+        trk = tk.Frame(root, bg=C["bg"])
+        trk.pack(fill="x", pady=(2, 4), **pad)
+        tk.Label(trk, text="Track", bg=C["bg"], fg=C["dim"], font=("Segoe UI", 10)).pack(side="left")
+        self.track_label = tk.Label(trk, text="none", bg=C["bg"], fg=C["fg"], anchor="w",
+                                    width=26, font=("Segoe UI", 10))
+        self.track_label.pack(side="left", padx=(8, 4))
+        self.track_widgets = []
+        for text, cmd in (("Load...", self.load_track_dialog), ("Clear", self.clear_track)):
+            b = ttk.Button(trk, text=text, style="Small.TButton", takefocus=0, command=cmd)
+            b.pack(side="left", padx=(0, 4))
+            self.track_widgets.append(b)
+        self.use_track_var = tk.BooleanVar(value=True)
+        cb = ttk.Checkbutton(trk, text="Play while recording", variable=self.use_track_var,
+                             takefocus=0, command=self.on_track_fields)
+        cb.pack(side="left", padx=(6, 10))
+        self.track_widgets.append(cb)
+        self.start_var = tk.StringVar()
+        self.leadin_var = tk.StringVar()
+        for label, var, width in (("Start at", self.start_var, 6), ("Count-in s", self.leadin_var, 4)):
+            tk.Label(trk, text=label, bg=C["bg"], fg=C["dim"]).pack(side="left", padx=(4, 4))
+            e = tk.Entry(trk, textvariable=var, width=width, font=("Segoe UI", 10), **entry_opts)
+            e.pack(side="left", ipady=2)
+            e.bind("<Return>", self.on_track_fields)
+            e.bind("<FocusOut>", self.on_track_fields)
+            self.track_widgets.append(e)
+        self.latency_label = tk.Label(trk, text="", bg=C["bg"], fg=C["dim"], font=("Segoe UI", 9))
+        cal = ttk.Button(trk, text="Calibrate", style="Small.TButton", takefocus=0,
+                         command=self._act(self.calibrate))
+        cal.pack(side="right")
+        self.track_widgets.append(cal)
+        self.latency_label.pack(side="right", padx=(0, 6))
 
         # Meter
         meter_frame = tk.Frame(root, bg=C["bg"])
@@ -185,7 +256,7 @@ class App:
         self.verdict_buttons = []
         for text, color, cmd in (("BAD  (B)", C["red"], self.mark_bad),
                                  ("GOOD  (G)", C["green"], self.mark_good)):
-            b = tk.Button(verdict, text=text, command=cmd, takefocus=0, width=12,
+            b = tk.Button(verdict, text=text, command=self._act(cmd), takefocus=0, width=12,
                           font=("Segoe UI", 15, "bold"), bg=color, fg="#0d1117",
                           activebackground=C["fg"], disabledforeground="#3a3d44",
                           relief="flat", cursor="hand2")
@@ -203,7 +274,7 @@ class App:
                 ("undo", "Undo trash (Ctrl+Z)", self.undo_trash),
                 ("play", "Play (P)", self.toggle_play),
                 ("star", "Star (S)", self.toggle_star)):
-            b = ttk.Button(bar, text=text, takefocus=0, command=cmd)
+            b = ttk.Button(bar, text=text, takefocus=0, command=self._act(cmd))
             b.pack(side="left", padx=(0, 6))
             self.buttons[key] = b
         self.show_trash = tk.BooleanVar(value=False)
@@ -223,7 +294,7 @@ class App:
         self.tree.tag_configure("starred", foreground=C["gold"])
         self.tree.tag_configure("bad", foreground=C["red"])
         self.tree.pack(fill="both", expand=True, pady=(10, 6), **pad)
-        self.tree.bind("<Double-1>", lambda e: self.toggle_play())
+        self.tree.bind("<Double-1>", lambda e: self._act(self.toggle_play)())
 
         tk.Label(root, text=HELP, bg=C["bg"], fg=C["dim"], font=("Segoe UI", 9)).pack(**pad)
 
@@ -233,7 +304,8 @@ class App:
         self.device_label = tk.Label(foot, text="", bg=C["bg"], fg=C["dim"], anchor="w",
                                      justify="left", font=("Segoe UI", 9))
         self.device_label.pack(side="left", fill="x", expand=True)
-        ttk.Button(foot, text="Reconnect", takefocus=0, command=self.connect).pack(side="right")
+        ttk.Button(foot, text="Reconnect", takefocus=0,
+                   command=self._act(lambda: self.connect(refresh=True))).pack(side="right")
 
     def _build_meter(self):
         cv = self.meter
@@ -256,6 +328,13 @@ class App:
             cv.create_line(x, y - 4, x, y, fill=C["dim"])
             cv.create_text(x, y + 2, anchor="n", fill=C["dim"], font=("Segoe UI", 8), text=str(db))
 
+    def _act(self, fn):
+        """Wrap a button/hotkey action so it does nothing while calibrating."""
+        def run():
+            if self.calibration is None:
+                fn()
+        return run
+
     def _bind_keys(self):
         for seq, fn in (("<space>", self.toggle_record),
                         ("<KeyPress-r>", self.retake), ("<KeyPress-R>", self.retake),
@@ -267,44 +346,129 @@ class App:
                         ("<KeyPress-g>", self.mark_good), ("<KeyPress-G>", self.mark_good),
                         ("<KeyPress-b>", self.mark_bad), ("<KeyPress-B>", self.mark_bad),
                         ("<Escape>", self.stop_playback)):
-            self.root.bind_all(seq, self._hotkey(fn))
+            self.root.bind_all(seq, self._hotkey(self._act(fn)))
 
     def _hotkey(self, fn):
         def handler(event):
             if isinstance(event.widget, (tk.Entry, ttk.Entry)):
-                return None  # typing a song name
+                return None  # typing in a text field
             fn()
             return "break"
         return handler
 
     # ---- device -----------------------------------------------------------
 
-    def connect(self):
+    def connect(self, refresh=False):
         if self.engine.recording:
             self.finish_take()
         self.engine.stop_playback()
-        self.engine.open()
+        self.engine.open(refresh=refresh)
         self._update_device_label()
 
     def _update_device_label(self):
         b = self.engine.backend
         if self.engine.input_paused:
             self.device_label.config(
-                text="Input paused during playback (the 26c can't run input and output at "
-                     "different rates).\nTo avoid this, set both 26c devices to 24-bit "
-                     f"{self.engine.samplerate} Hz in Windows Sound settings.", fg=C["yellow"])
+                text="Input paused during playback: the 26c can't run input and output at "
+                     "different rates.\nSet Hz to auto to avoid this.", fg=C["yellow"])
             return
         if b is None:
             self.device_label.config(text=self.engine.error or "No interface", fg=C["red"])
             return
         quality = ("bit-perfect" if b.bit_perfect
                    else "NOT bit-perfect -- Windows is processing the signal")
+        auto = " (auto)" if self.engine.requested_rate == "auto" else ""
         self.device_label.config(
-            text=f"{b.describe()}  |  {self.engine.samplerate} Hz / 24-bit WAV  |  {quality}\n"
+            text=f"{b.describe()}  |  {self.engine.samplerate} Hz{auto} / 24-bit WAV  |  {quality}\n"
                  f"Playback: {self.engine.output_name()}   |   Takes: {self.song.dir}",
             fg=C["green"] if b.bit_perfect else C["yellow"])
 
     # ---- song / settings --------------------------------------------------
+
+    def _open_song_extras(self):
+        """Recover crashed takes and load the backing track of the current song."""
+        fixed = self.song.recover()
+        if fixed:
+            labels = ", ".join(f"{n:03d}" for n in fixed)
+            print(f"[{PROCESS_TITLE}] recovered take(s) {labels} in '{self.song.name}'")
+            self.flash(f"Recovered take {labels} after a crash")
+        self._load_track_data()
+        self._show_track_fields()
+        self.refresh_takes()
+
+    def _load_track_data(self):
+        self.track_data = None
+        path = self.song.track_path
+        if path is None:
+            return
+        try:
+            self.track_data = engine.load_track(path)
+        except Exception as exc:
+            messagebox.showerror("Take Recorder", f"Could not read the backing track:\n{exc}")
+
+    def _show_track_fields(self):
+        cfg = self.song.config
+        if self.track_data is not None:
+            name = cfg["track"].removeprefix("backing - ")
+            length = len(self.track_data[0]) / self.track_data[1]
+            self.track_label.config(text=f"{name}  ({fmt_clock(length)})", fg=C["fg"])
+        else:
+            self.track_label.config(text="none (records dry)", fg=C["dim"])
+        self.use_track_var.set(bool(cfg.get("use_track", True)))
+        self.start_var.set(fmt_clock(cfg.get("start_at", 0.0)))
+        self.leadin_var.set(f"{cfg.get('leadin', 2.0):g}")
+        latency = self.settings.get("latency_ms")
+        if latency is None:
+            self.latency_label.config(text="Latency: not calibrated", fg=C["yellow"])
+        else:
+            self.latency_label.config(text=f"Latency: {latency:.1f} ms", fg=C["dim"])
+
+    def on_track_fields(self, event=None):
+        cfg = self.song.config
+        try:
+            start = parse_clock(self.start_var.get())
+            if self.track_data is not None:
+                start = min(start, len(self.track_data[0]) / self.track_data[1])
+            cfg["start_at"] = round(start, 2)
+        except ValueError:
+            pass
+        try:
+            cfg["leadin"] = max(0.0, min(30.0, float(self.leadin_var.get())))
+        except ValueError:
+            pass
+        cfg["use_track"] = bool(self.use_track_var.get())
+        self.song.save_config()
+        self._show_track_fields()
+        if event is None or event.type != tk.EventType.FocusOut:
+            self.root.focus_set()
+        return "break" if event is not None else None
+
+    def load_track_dialog(self):
+        if self.engine.recording:
+            return
+        pattern = " ".join(f"*{ext}" for ext in TRACK_EXTENSIONS)
+        path = filedialog.askopenfilename(title="Choose a backing track",
+                                          filetypes=[("Audio", pattern), ("All files", "*.*")])
+        self.root.focus_set()
+        if not path:
+            return
+        try:
+            self.song.set_track(path)
+        except Exception as exc:
+            messagebox.showerror("Take Recorder", f"Could not use that track:\n{exc}")
+            return
+        self.song.config["start_at"] = 0.0
+        self.song.save_config()
+        self._load_track_data()
+        self._show_track_fields()
+
+    def clear_track(self):
+        if self.engine.recording:
+            return
+        self.song.clear_track()
+        self.track_data = None
+        self._show_track_fields()
+        self.root.focus_set()
 
     def on_song_enter(self, event=None):
         name = self.song_var.get().strip()
@@ -314,7 +478,7 @@ class App:
             self.last_recorded = None
             self.settings["song"] = self.song.name
             save_settings(self.settings)
-            self.refresh_takes()
+            self._open_song_extras()
             self._update_device_label()
         self.song_var.set(self.song.name)
         self.root.focus_set()
@@ -332,9 +496,10 @@ class App:
         self.root.focus_set()
 
     def on_rate(self, event=None):
-        rate = int(self.rate_var.get())
-        if self.engine.recording or rate == self.engine.samplerate:
-            self.rate_var.set(str(self.engine.samplerate))
+        choice = self.rate_var.get()
+        rate = choice if choice == "auto" else int(choice)
+        if self.engine.recording or rate == self.engine.requested_rate:
+            self.rate_var.set(str(self.engine.requested_rate))
             self.root.focus_set()
             return
         self.settings["samplerate"] = rate
@@ -363,6 +528,16 @@ class App:
         live = [t for t in self.song.takes() if not t.trashed]
         return live[-1] if live else None
 
+    def _make_cue(self):
+        cfg = self.song.config
+        if self.track_data is None or not cfg.get("use_track", True):
+            return None
+        data, rate = self.track_data
+        length = len(data) / rate
+        play_from = max(0.0, min(cfg["start_at"] - cfg["leadin"], length - 1.0))
+        latency = (self.settings.get("latency_ms") or 0.0) / 1000
+        return engine.TrackCue(data, rate, play_from, latency)
+
     def toggle_record(self):
         if self.engine.recording:
             self.finish_take()
@@ -371,23 +546,34 @@ class App:
         if self.engine.backend is None or self.engine.lost:
             self.flash("Interface not connected -- click Reconnect")
             return
+        cue = self._make_cue()
         num, path = self.song.next_path()
+        extra = {}
+        if cue is not None:
+            extra = {"track": self.song.config["track"], "track_start": round(cue.play_from, 3),
+                     "latency_ms": self.settings.get("latency_ms")}
+        self.song.begin(num, **extra)
         try:
-            self.engine.start_take(str(path))
+            self.engine.start_take(str(path), cue)
         except Exception as exc:
+            self.song.forget(num)
             messagebox.showerror("Take Recorder", f"Could not start take:\n{exc}")
             return
         self.current_num = num
+        self.current_cue = cue
         self.reset_clip()
         self._set_recording_ui(True)
 
     def finish_take(self):
         result = self.engine.stop_take()
         num, self.current_num = self.current_num, None
+        self.current_cue = None
         self._set_recording_ui(False)
         if result is None:
             return None
-        self.song.record(num, result.seconds, result.peak_db, result.clipped, result.dropouts)
+        extra = {"unaligned": True} if result.align_failed else {}
+        self.song.record(num, result.seconds, result.peak_db, result.clipped, result.dropouts,
+                         **extra)
         if result.error:
             messagebox.showerror("Take Recorder", f"Take {num:03d} hit a disk error:\n{result.error}")
         self.last_recorded = num
@@ -398,8 +584,8 @@ class App:
         state = "disabled" if recording else "normal"
         self.song_entry.config(state=state)
         self.rate_box.config(state="disabled" if recording else "readonly")
-        for b in self.input_buttons:
-            b.config(state=state)
+        for w in self.input_buttons + self.track_widgets:
+            w.config(state=state)
         self.buttons["rec"].config(text="Stop (Space)" if recording else "Record (Space)")
         self.buttons["trash"].config(text="Abort take (Bksp)" if recording else "Trash (Bksp)")
         self._update_verdict()
@@ -451,7 +637,7 @@ class App:
         self.flash(f"Take {num:03d}  BAD -- trashed  (Ctrl+Z to undo)")
 
     def _update_verdict(self):
-        if self.engine.recording:
+        if self.engine.recording and self.current_num is not None:
             text, fg, state = (f"Recording take {self.current_num:03d}  --  "
                                "G keeps it, B scraps it", C["fg"], "normal")
         elif self.last_recorded is not None:
@@ -500,14 +686,20 @@ class App:
             notes = []
             if t.starred:
                 notes.append("* KEEPER")
+            if t.track:
+                notes.append(f"over track from {fmt_clock(t.track_start)}")
             if t.clipped:
                 notes.append("CLIPPED")
             if t.dropouts:
                 notes.append(f"DROPOUT x{t.dropouts}")
+            if t.unaligned:
+                notes.append("NOT ALIGNED")
+            if t.recovered:
+                notes.append("RECOVERED")
             if t.trashed:
                 notes.append("(trash)")
-            tag = "trashed" if t.trashed else "bad" if (t.clipped or t.dropouts) else \
-                "starred" if t.starred else ""
+            tag = "trashed" if t.trashed else "bad" if (t.clipped or t.dropouts or t.unaligned) \
+                else "starred" if t.starred else ""
             peak = f"{t.peak_db:.1f}" if t.peak_db > -199 else "--"
             self.tree.insert("", "end", iid=str(t.num), tags=(tag,),
                              values=(t.label, fmt_time(t.seconds), peak, "   ".join(notes)))
@@ -527,8 +719,12 @@ class App:
         if self.playing_num == take.num:
             self.stop_playback()
             return
+        backing = None
+        if take.track and take.track == self.song.config.get("track"):
+            backing = self.track_data
         try:
-            self.engine.play(str(take.path))
+            self.engine.play(str(take.path), start_s=take.track_start if take.track else 0.0,
+                             backing=backing, track_gain=self.settings.get("track_gain", 0.7))
         except Exception as exc:
             self._update_device_label()
             messagebox.showerror("Take Recorder", f"Could not play take {take.label}:\n{exc}")
@@ -543,6 +739,49 @@ class App:
         if paused:
             self._update_device_label()
 
+    # ---- latency calibration ------------------------------------------------
+
+    def calibrate(self):
+        if self.engine.recording or self.engine.backend is None:
+            return
+        if not messagebox.askokcancel("Calibrate latency", CALIBRATE_HELP):
+            self.root.focus_set()
+            return
+        self.root.focus_set()
+        data, times = engine.click_track(self.engine.samplerate)
+        path = self.takes_root / ".calibration.wav"
+        try:
+            self.engine.start_take(str(path), engine.TrackCue(data, self.engine.samplerate, 0.0))
+        except Exception as exc:
+            messagebox.showerror("Take Recorder", f"Could not start calibration:\n{exc}")
+            return
+        self.calibration = {"path": path, "times": times}
+        self._set_recording_ui(True)
+
+    def _finish_calibration(self):
+        cal, self.calibration = self.calibration, None
+        result = self.engine.stop_take()
+        try:
+            if result is None or result.align_failed:
+                raise ValueError("The track and the input never lined up. Try again, or "
+                                 "click Reconnect first.")
+            audio, rate = sf.read(str(cal["path"]), dtype="float32", always_2d=True)
+            delays = engine.detect_click_delays(audio.mean(axis=1), rate, cal["times"])
+            latency, spread = engine.calibration_result(delays)
+        except Exception as exc:
+            messagebox.showwarning("Calibration didn't work", str(exc))
+            return
+        finally:
+            cal["path"].unlink(missing_ok=True)
+            self._set_recording_ui(False)
+        self.settings["latency_ms"] = round(latency * 1000, 1)
+        save_settings(self.settings)
+        self._show_track_fields()
+        messagebox.showinfo("Calibrated",
+                            f"Latency: {latency * 1000:.1f} ms  (clicks agreed within "
+                            f"{spread * 1000:.1f} ms).\n\nNew takes over a backing track are "
+                            "shifted by this much so they line up with the beat.")
+
     # ---- meter / status -----------------------------------------------------
 
     def reset_clip(self):
@@ -550,9 +789,16 @@ class App:
         self.clip_label.config(bg=C["panel"], fg=C["dim"])
 
     def flash(self, text):
-        self._flash = (text, 2.0)
+        self._flash = (text, 2.5)
 
     def tick(self):
+        try:
+            self._tick()
+        except Exception:
+            traceback.print_exc()  # keep the meter alive; the console shows what broke
+        self.root.after(TICK_MS, self.tick)
+
+    def _tick(self):
         dt = TICK_MS / 1000
         peaks = self.engine.take_peaks()
         selected = INPUT_CHOICES[self.input_var.get()]
@@ -578,6 +824,9 @@ class App:
                 self.clip_label.config(bg=C["red"], fg="white")
 
         if self.engine.lost:
+            if self.calibration is not None:
+                self.calibration = None
+                self.engine.stop_take()
             if self.engine.recording:
                 num = self.finish_take()
                 messagebox.showwarning("Take Recorder",
@@ -588,12 +837,34 @@ class App:
             self.engine.lost = False
             self._update_device_label()
 
+        track = self.engine.track
+        if self.engine.recording and track is not None and not track.active:
+            if self.calibration is not None:
+                self._finish_calibration()
+            else:
+                num = self.finish_take()
+                self.flash(f"Track ended -- take {num:03d} saved")
+            track = None
+
         player = self.engine.player
         if self.playing_num is not None and (player is None or not player.active):
             self.stop_playback()
 
         flash = self._flash
-        if self.engine.recording:
+        if self.calibration is not None:
+            self.status.config(text="CALIBRATING   keep the ear cup on the mic",
+                               bg=C["yellow"], fg="#0d1117")
+        elif self.engine.recording and track is not None:
+            start_at = self.song.config["start_at"]
+            if track.seconds < start_at:
+                self.status.config(text=f"REC   take {self.current_num:03d}   "
+                                        f"in {start_at - track.seconds:.1f}",
+                                   bg=C["yellow"], fg="#0d1117")
+            else:
+                self.status.config(text=f"REC   take {self.current_num:03d}   "
+                                        f"@ {fmt_time(track.seconds)}",
+                                   bg=C["red"], fg="white")
+        elif self.engine.recording:
             self.status.config(text=f"REC   take {self.current_num:03d}   "
                                     f"{fmt_time(self.engine.take_seconds())}",
                                bg=C["red"], fg="white")
@@ -609,9 +880,10 @@ class App:
         else:
             self.status.config(text="READY   Space to record", bg=C["panel"], fg=C["fg"])
 
-        self.root.after(TICK_MS, self.tick)
-
     def on_close(self):
+        if self.calibration is not None:
+            self.calibration = None
+            self.engine.stop_take()
         if self.engine.recording:
             self.finish_take()
         self.engine.stop_playback()
