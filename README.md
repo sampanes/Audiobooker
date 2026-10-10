@@ -32,11 +32,13 @@ The app runs in a minimized console window titled `take-recorder`.
 | Backspace    | Trash the selected take (while recording: abort this take)     |
 | Ctrl+Z       | Undo trash                                                     |
 | P / Enter    | Play / stop the selected take (newest if none selected)        |
+| V            | Cycle Sound good playback: Off / Gentle / Strong               |
 | S            | Star a keeper                                                  |
 | Esc          | Stop playback                                                  |
 
-Nothing is ever deleted: trashed takes move to `takes/<song>/trash/`. Take
-numbers are never reused, so `take_007.wav` always means the same take.
+Raw recordings are never deleted: trashed takes move to `takes/<song>/trash/`.
+Take numbers are never reused, so `take_007.wav` always means the same take.
+Generated Sound good cache files are disposable and may be pruned or regenerated.
 
 Each take starts 0.3 s *before* you press Space (pre-roll), so the breath or
 pickup isn't cut off. (Takes over a backing track use the count-in instead.)
@@ -94,6 +96,25 @@ marks it `RECOVERED` in the list.
   48V stops at the Cloudlifter and never reaches the mic, so use one with
   dynamic mics only -- a condenser needs phantom at the mic itself.
 
+## Sound good playback
+
+Use **Off / Gentle / Strong** beside Play to compare a take with offline vocal
+polish. Off always plays the untouched recording. Gentle applies slower,
+partial pitch correction and a light vocal chain; Strong snaps harder and adds
+a small amount of ambience. Press V to cycle the modes. If a polished version
+is not cached yet, the status bar says `POLISHING` before playback begins.
+
+The Key control limits pitch correction to a major or minor scale. Loading a
+backing track estimates its key once; uncertain estimates fall back to
+Chromatic. You can override the estimate at any time. Dry songs default to
+Chromatic.
+
+Polishing never writes to a raw `take_NNN.wav`. It renders a separate 24-bit
+file under `takes/<song>/polished/`, keeping the exact frame count, sample rate,
+channel count and leading timeline silence so playback stays aligned with the
+backing track. The cache is regenerated when the take, mode, key or processing
+recipe changes, and orphaned cache files are removed when the song opens.
+
 ## Settings
 
 `settings.json` is created on first run (and is git-ignored):
@@ -108,16 +129,19 @@ marks it `RECOVERED` in the list.
 | `takes_dir`       | `"takes"`                     | Where song folders go (relative or absolute) |
 | `latency_ms`      | `null`                        | Set by Calibrate                           |
 | `track_gain`      | `0.7`                         | Track level under the vocal when playing back |
+| `polish`          | `"off"`                       | Sound good playback: `off`, `gentle`, or `strong` |
 
-Per-song track settings (track file, start point, count-in) live in
-`takes/<song>/song.json`; per-take details in `takes/<song>/takes.json`.
+Per-song track settings (track file, start point, count-in and vocal key) live
+in `takes/<song>/song.json`; per-take details live in
+`takes/<song>/takes.json`.
 
 ## Layout
 
 ```
 app.py       Tkinter window, hotkeys, meter
 engine.py    Input stream, take writer, backing track + alignment, playback
-takes.py     Song folders, trash/restore, take metadata, crash recovery
+polish.py    Offline pitch correction, key estimation and vocal polish
+takes.py     Song folders, metadata, crash recovery and polished cache
 tests/       python -m unittest discover -s tests -t .
 ```
 

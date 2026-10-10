@@ -4,7 +4,9 @@ import atexit
 import ctypes
 import json
 import os
+import queue
 import sys
+import threading
 import tkinter as tk
 import traceback
 from datetime import date
@@ -14,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 import soundfile as sf
 
 import engine
+import polish
 from takes import TRACK_EXTENSIONS, Song
 
 HERE = Path(__file__).resolve().parent
@@ -30,9 +33,11 @@ DEFAULTS = {
     "takes_dir": "takes",
     "latency_ms": None,
     "track_gain": 0.7,
+    "polish": "off",
 }
 INPUT_CHOICES = {"1": [0], "2": [1], "1+2": [0, 1]}
 SAMPLE_RATES = ("auto", "44100", "48000", "96000")
+KEY_CONFIDENCE_MIN = 0.12
 
 METER_W = 640
 BAR_H = 26
@@ -45,8 +50,8 @@ C = dict(bg="#1e1f22", panel="#2b2d31", fg="#e6e6e6", dim="#8a8f98", green="#3fb
          yellow="#d29922", red="#f85149", blue="#58a6ff", gold="#e3b341", grey="#5c6370",
          target="#24382a")
 
-HELP = ("Space  record / stop      G / B  last take good / bad      R  retake      "
-        "Backspace  trash      Ctrl+Z  undo trash      P  play      S  star")
+HELP = ("Space record / stop   G / B good / bad   R retake   Backspace trash   "
+        "Ctrl+Z undo   P play   V sound good   S star")
 
 CALIBRATE_HELP = (
     "This measures the delay between the backing track and your recording, so takes "
@@ -64,6 +69,10 @@ def load_settings():
         settings.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         pass
+    try:
+        settings["polish"] = polish.normalize_mode(settings.get("polish", "off"))
+    except (TypeError, ValueError):
+        settings["polish"] = "off"
     return settings
 
 
@@ -114,6 +123,18 @@ class App:
         self.calibration = None
         self._flash = None
         self.playing_num = None
+        self.playing_mode = None
+        self._play_request_id = 0
+        self._pending_play = None
+        self._polishing = None
+        self._key_request_id = 0
+        self._estimating_key = None
+        self._closing = False
+        self._work_queue = queue.Queue()
+        self._work_results = queue.SimpleQueue()
+        self._worker = threading.Thread(target=self._work_loop, name="polish-worker",
+                                        daemon=True)
+        self._worker.start()
         self.undo_stack = []
         self.display_db = [METER_MIN_DB] * engine.METER_CHANNELS
         self.hold_db = [METER_MIN_DB] * engine.METER_CHANNELS
@@ -272,7 +293,6 @@ class App:
                 ("retake", "Retake (R)", self.retake),
                 ("trash", "Trash (Bksp)", self.trash),
                 ("undo", "Undo trash (Ctrl+Z)", self.undo_trash),
-                ("play", "Play (P)", self.toggle_play),
                 ("star", "Star (S)", self.toggle_star)):
             b = ttk.Button(bar, text=text, takefocus=0, command=self._act(cmd))
             b.pack(side="left", padx=(0, 6))
@@ -280,6 +300,32 @@ class App:
         self.show_trash = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Show trash", variable=self.show_trash, takefocus=0,
                         command=self.on_show_trash).pack(side="right")
+
+        # Playback options get their own compact row so the controls still fit
+        # at the minimum window width.
+        playback = tk.Frame(root, bg=C["bg"])
+        playback.pack(fill="x", pady=(6, 0), **pad)
+        b = ttk.Button(playback, text="Play (P)", takefocus=0,
+                       command=self._act(self.toggle_play))
+        b.pack(side="left", padx=(0, 10))
+        self.buttons["play"] = b
+        tk.Label(playback, text="Sound good (V)", bg=C["bg"], fg=C["dim"]).pack(side="left")
+        self.polish_var = tk.StringVar(value=self.settings["polish"])
+        self.polish_buttons = []
+        for mode in polish.MODES:
+            button = ttk.Radiobutton(playback, text=mode.title(), value=mode,
+                                     variable=self.polish_var, takefocus=0,
+                                     command=self.on_polish_mode)
+            button.pack(side="left", padx=(6, 0))
+            self.polish_buttons.append(button)
+        self.key_var = tk.StringVar(value=self._song_key_name())
+        self.key_box = ttk.Combobox(playback, textvariable=self.key_var,
+                                    values=tuple(polish.KEY_NAMES), width=13,
+                                    state="readonly", takefocus=0)
+        self.key_box.pack(side="right")
+        self.key_box.bind("<<ComboboxSelected>>", self.on_key)
+        tk.Label(playback, text="Key", bg=C["bg"], fg=C["dim"]).pack(side="right",
+                 padx=(10, 4))
 
         # Takes list
         cols = ("take", "length", "peak", "notes")
@@ -342,6 +388,8 @@ class App:
                         ("<Control-z>", self.undo_trash), ("<Control-Z>", self.undo_trash),
                         ("<KeyPress-p>", self.toggle_play), ("<KeyPress-P>", self.toggle_play),
                         ("<Return>", self.toggle_play),
+                        ("<KeyPress-v>", self.cycle_polish),
+                        ("<KeyPress-V>", self.cycle_polish),
                         ("<KeyPress-s>", self.toggle_star), ("<KeyPress-S>", self.toggle_star),
                         ("<KeyPress-g>", self.mark_good), ("<KeyPress-G>", self.mark_good),
                         ("<KeyPress-b>", self.mark_bad), ("<KeyPress-B>", self.mark_bad),
@@ -356,12 +404,152 @@ class App:
             return "break"
         return handler
 
+    # ---- background work -------------------------------------------------
+
+    def _render_job_current(self, job):
+        cancel = job.get("cancel")
+        return (not self._closing and cancel is not None and not cancel.is_set() and
+                self._pending_play is job and job["request_id"] == self._play_request_id and
+                job["song"] is self.song)
+
+    def _key_job_current(self, job):
+        cancel = job.get("cancel")
+        return (not self._closing and cancel is not None and not cancel.is_set() and
+                self._estimating_key is job and job["request_id"] == self._key_request_id and
+                job["song"] is self.song)
+
+    def _work_loop(self):
+        """Run polish renders and key estimates without touching Tk."""
+        while True:
+            job = self._work_queue.get()
+            if job is None:
+                return
+            try:
+                if job["kind"] == "render":
+                    if not self._render_job_current(job):
+                        result = None
+                    else:
+                        song = job["song"]
+                        take = job["take"]
+                        path = song.cached_polished(take, job["mode"], job["recipe"])
+                        if not self._render_job_current(job):
+                            path = None
+                        elif path is None:
+                            source_stamp = song.polish_source_stamp(take)
+                            data, rate = sf.read(str(take.path), dtype="float32", always_2d=True)
+                            data = polish.render(
+                                data, rate, job["mode"], job["key"],
+                                cancel=lambda: not self._render_job_current(job))
+                            if self._render_job_current(job):
+                                path = song.publish_polished(
+                                    take, job["mode"], job["recipe"], data, rate,
+                                    expected_source=source_stamp)
+                            else:
+                                path = None
+                        result = path
+                elif job["kind"] == "key":
+                    if self._key_job_current(job):
+                        result = polish.estimate_key(
+                            job["data"], job["rate"],
+                            cancel=lambda: not self._key_job_current(job))
+                    else:
+                        result = None
+                elif job["kind"] == "prune":
+                    result = job["song"].prune_polished()
+                else:
+                    raise ValueError(f"Unknown background job {job['kind']!r}")
+                error = None
+            except Exception as exc:
+                result, error = None, exc
+            self._work_results.put((job, result, error))
+            del job, result, error
+
+    def _poll_work_results(self):
+        while True:
+            try:
+                job, result, error = self._work_results.get_nowait()
+            except queue.Empty:
+                return
+            if job["kind"] == "render":
+                self._finish_render(job, result, error)
+            elif job["kind"] == "key":
+                self._finish_key_estimate(job, result, error)
+            elif error is not None and not self._closing:
+                print(f"[{PROCESS_TITLE}] could not prune polished cache: {error}")
+
+    def _finish_render(self, job, path, error):
+        if (self._closing or self._pending_play is not job or
+                job["request_id"] != self._play_request_id or job["song"] is not self.song):
+            return
+        self._pending_play = None
+        self._polishing = None
+        if error is not None:
+            messagebox.showerror("Take Recorder",
+                                 f"Could not polish take {job['take'].label}:\n{error}")
+            return
+        take = self.song.get(job["take"].num)
+        if take is None or take.trashed:
+            return
+        self._start_playback(take, path, job["mode"], job["request_id"], job["song"])
+
+    def _finish_key_estimate(self, job, result, error):
+        if (self._closing or self._estimating_key is not job or
+                job["request_id"] != self._key_request_id or job["song"] is not self.song):
+            return
+        self._estimating_key = None
+        fallback = polish.KEY_NAMES[0]
+        if error is not None:
+            name = fallback
+            notice = "Key estimate failed -- using Chromatic"
+        else:
+            name, confidence = result
+            if name not in polish.KEY_NAMES or confidence < KEY_CONFIDENCE_MIN:
+                name = fallback
+                notice = f"Key uncertain ({confidence:.2f}) -- using Chromatic"
+            else:
+                notice = f"Estimated key: {name} ({confidence:.2f})"
+        active = self._active_audition()
+        old_name = self._song_key_name()
+        self.song.config["key"] = name
+        self.song.save_config()
+        self.key_var.set(name)
+        self.flash(notice)
+        if active is not None and active[1] != "off" and name != old_name:
+            take = self.song.get(active[0])
+            if take is not None and not take.trashed:
+                self._request_play(take, active[1])
+
+    def _cancel_key_estimate(self):
+        if self._estimating_key is not None:
+            self._estimating_key["cancel"].set()
+        self._key_request_id += 1
+        self._estimating_key = None
+
+    def _queue_key_estimate(self):
+        if self.track_data is None:
+            return
+        self._cancel_key_estimate()
+        fallback = polish.KEY_NAMES[0]
+        self.song.config.pop("key", None)
+        self.song.save_config()
+        self.key_var.set(fallback)
+        data, rate = self.track_data
+        job = {"kind": "key", "request_id": self._key_request_id,
+               "song": self.song, "data": data, "rate": rate,
+               "cancel": threading.Event()}
+        self._estimating_key = job
+        self._work_queue.put(job)
+
+    def _song_key_name(self):
+        name = self.song.config.get("key", polish.KEY_NAMES[0])
+        return name if name in polish.KEY_NAMES else polish.KEY_NAMES[0]
+
     # ---- device -----------------------------------------------------------
 
     def connect(self, refresh=False):
         if self.engine.recording:
             self.finish_take()
-        self.engine.stop_playback()
+        self.stop_playback()
         self.engine.open(refresh=refresh)
         self._update_device_label()
 
@@ -392,9 +580,13 @@ class App:
             labels = ", ".join(f"{n:03d}" for n in fixed)
             print(f"[{PROCESS_TITLE}] recovered take(s) {labels} in '{self.song.name}'")
             self.flash(f"Recovered take {labels} after a crash")
+        self._work_queue.put({"kind": "prune", "song": self.song})
+        estimate_key = self.song.config.get("key") not in polish.KEY_NAMES
         self._load_track_data()
         self._show_track_fields()
         self.refresh_takes()
+        if estimate_key and self.track_data is not None:
+            self._queue_key_estimate()
 
     def _load_track_data(self):
         self.track_data = None
@@ -422,6 +614,7 @@ class App:
             self.latency_label.config(text="Latency: not calibrated", fg=C["yellow"])
         else:
             self.latency_label.config(text=f"Latency: {latency:.1f} ms", fg=C["dim"])
+        self.key_var.set(self._song_key_name())
 
     def on_track_fields(self, event=None):
         cfg = self.song.config
@@ -452,20 +645,29 @@ class App:
         self.root.focus_set()
         if not path:
             return
+        self.stop_playback()
+        self._cancel_key_estimate()
         try:
             self.song.set_track(path)
         except Exception as exc:
             messagebox.showerror("Take Recorder", f"Could not use that track:\n{exc}")
             return
+        self.song.config.pop("key", None)
         self.song.config["start_at"] = 0.0
         self.song.save_config()
         self._load_track_data()
         self._show_track_fields()
+        if self.track_data is not None:
+            self._queue_key_estimate()
 
     def clear_track(self):
         if self.engine.recording:
             return
+        self.stop_playback()
+        self._cancel_key_estimate()
         self.song.clear_track()
+        self.song.config["key"] = polish.KEY_NAMES[0]
+        self.song.save_config()
         self.track_data = None
         self._show_track_fields()
         self.root.focus_set()
@@ -473,6 +675,8 @@ class App:
     def on_song_enter(self, event=None):
         name = self.song_var.get().strip()
         if name and not self.engine.recording:
+            self.stop_playback()
+            self._cancel_key_estimate()
             self.song = Song(self.takes_root, name)
             self.undo_stack.clear()
             self.last_recorded = None
@@ -504,12 +708,58 @@ class App:
             return
         self.settings["samplerate"] = rate
         save_settings(self.settings)
+        self.stop_playback()
         self.engine.close()
         self.engine = engine.Engine(self.settings["device_match"], rate,
                                     self.settings["preroll_seconds"])
         self.engine.set_channels(INPUT_CHOICES[self.input_var.get()])
         self.connect()
         self.root.focus_set()
+
+    def on_polish_mode(self):
+        try:
+            mode = polish.normalize_mode(self.polish_var.get())
+        except (TypeError, ValueError):
+            mode = "off"
+        self.polish_var.set(mode)
+        active = self._active_audition()
+        changed = self.settings.get("polish") != mode
+        self.settings["polish"] = mode
+        save_settings(self.settings)
+        self.root.focus_set()
+        if active is not None and active[1] != mode:
+            take = self.song.get(active[0])
+            if take is not None:
+                self._request_play(take, mode)
+        elif changed:
+            self.flash(f"Sound good: {mode.title()}")
+
+    def cycle_polish(self):
+        try:
+            current = polish.normalize_mode(self.polish_var.get())
+        except (TypeError, ValueError):
+            current = "off"
+        modes = tuple(polish.MODES)
+        self.polish_var.set(modes[(modes.index(current) + 1) % len(modes)])
+        self.on_polish_mode()
+
+    def on_key(self, event=None):
+        name = self.key_var.get()
+        if name not in polish.KEY_NAMES:
+            name = polish.KEY_NAMES[0]
+            self.key_var.set(name)
+        self._cancel_key_estimate()
+        active = self._active_audition()
+        changed = self._song_key_name() != name
+        self.song.config["key"] = name
+        self.song.save_config()
+        self.root.focus_set()
+        if changed and active is not None and active[1] != "off":
+            take = self.song.get(active[0])
+            if take is not None and not take.trashed:
+                self._request_play(take, active[1])
+        elif changed:
+            self.flash(f"Key: {name}")
 
     def on_show_trash(self):
         self.refresh_takes()
@@ -553,10 +803,14 @@ class App:
             extra = {"track": self.song.config["track"], "track_start": round(cue.play_from, 3),
                      "latency_ms": self.settings.get("latency_ms")}
         self.song.begin(num, **extra)
+        self._cancel_key_estimate()
         try:
             self.engine.start_take(str(path), cue)
         except Exception as exc:
             self.song.forget(num)
+            if (self.track_data is not None and
+                    self.song.config.get("key") not in polish.KEY_NAMES):
+                self._queue_key_estimate()
             messagebox.showerror("Take Recorder", f"Could not start take:\n{exc}")
             return
         self.current_num = num
@@ -581,6 +835,11 @@ class App:
         return num
 
     def _set_recording_ui(self, recording):
+        if recording:
+            self._cancel_key_estimate()
+        elif (not self._closing and self.track_data is not None and
+              self.song.config.get("key") not in polish.KEY_NAMES):
+            self._queue_key_estimate()
         state = "disabled" if recording else "normal"
         self.song_entry.config(state=state)
         self.rate_box.config(state="disabled" if recording else "readonly")
@@ -651,6 +910,9 @@ class App:
             b.config(state=state, bg=color if state == "normal" else C["panel"])
 
     def _trash_num(self, num):
+        active = self._active_audition()
+        if active is not None and active[0] == num:
+            self.stop_playback()
         if num == self.last_recorded:
             self.last_recorded = None
         if self.song.trash(num):
@@ -710,32 +972,91 @@ class App:
 
     # ---- playback ------------------------------------------------------------
 
+    def _active_audition(self):
+        job = self._pending_play
+        if (job is not None and job["request_id"] == self._play_request_id and
+                job["song"] is self.song):
+            return job["take"].num, job["mode"]
+        if self.playing_num is not None:
+            return self.playing_num, self.playing_mode
+        return None
+
     def toggle_play(self):
         if self.engine.recording:
             return
         take = self.target_take()
         if take is None:
             return
-        if self.playing_num == take.num:
+        active = self._active_audition()
+        if active is not None and active[0] == take.num:
             self.stop_playback()
             return
+        self._request_play(take, self.polish_var.get())
+
+    def _request_play(self, take, mode):
+        if self.engine.recording or self.calibration is not None:
+            return
+        try:
+            mode = polish.normalize_mode(mode)
+        except (TypeError, ValueError):
+            mode = "off"
+        self.stop_playback()
+        request_id = self._play_request_id
+        song = self.song
+        if mode == "off":
+            self._start_playback(take, take.path, mode, request_id, song)
+            return
+        if take.trashed:
+            self.flash(f"Restore take {take.label} before polishing it")
+            return
+        try:
+            key = polish.parse_key(self._song_key_name())
+            recipe = polish.recipe_hash(mode, key)
+        except Exception as exc:
+            messagebox.showerror("Take Recorder",
+                                 f"Could not prepare take {take.label}:\n{exc}")
+            return
+        job = {"kind": "render", "request_id": request_id, "song": song,
+               "take": take, "mode": mode, "key": key, "recipe": recipe,
+               "cancel": threading.Event()}
+        self._pending_play = job
+        self._polishing = job
+        self._work_queue.put(job)
+
+    def _start_playback(self, take, path, mode, request_id, song):
+        if (self._closing or self.engine.recording or self.calibration is not None or
+                request_id != self._play_request_id or song is not self.song):
+            return
+        current = self.song.get(take.num)
+        if current is None or (current.trashed and mode != "off"):
+            return
         backing = None
-        if take.track and take.track == self.song.config.get("track"):
+        if current.track and current.track == self.song.config.get("track"):
             backing = self.track_data
         try:
-            self.engine.play(str(take.path), start_s=take.track_start if take.track else 0.0,
+            self.engine.play(str(path),
+                             start_s=current.track_start if current.track else 0.0,
                              backing=backing, track_gain=self.settings.get("track_gain", 0.7))
         except Exception as exc:
             self._update_device_label()
-            messagebox.showerror("Take Recorder", f"Could not play take {take.label}:\n{exc}")
+            messagebox.showerror("Take Recorder", f"Could not play take {current.label}:\n{exc}")
             return
-        self.playing_num = take.num
+        self._pending_play = None
+        self._polishing = None
+        self.playing_num = current.num
+        self.playing_mode = mode
         self._update_device_label()
 
     def stop_playback(self):
+        if self._pending_play is not None:
+            self._pending_play["cancel"].set()
+        self._play_request_id += 1
+        self._pending_play = None
+        self._polishing = None
         paused = self.engine.input_paused
         self.engine.stop_playback()
         self.playing_num = None
+        self.playing_mode = None
         if paused:
             self._update_device_label()
 
@@ -748,15 +1069,33 @@ class App:
             self.root.focus_set()
             return
         self.root.focus_set()
+        self.stop_playback()
+        self._cancel_key_estimate()
         data, times = engine.click_track(self.engine.samplerate)
         path = self.takes_root / ".calibration.wav"
         try:
             self.engine.start_take(str(path), engine.TrackCue(data, self.engine.samplerate, 0.0))
         except Exception as exc:
+            if (self.track_data is not None and
+                    self.song.config.get("key") not in polish.KEY_NAMES):
+                self._queue_key_estimate()
             messagebox.showerror("Take Recorder", f"Could not start calibration:\n{exc}")
             return
         self.calibration = {"path": path, "times": times}
         self._set_recording_ui(True)
+
+    def _abort_calibration(self):
+        """Stop and remove an unfinished latency-calibration recording."""
+        cal, self.calibration = self.calibration, None
+        if cal is None:
+            return False
+        self.engine.stop_take()
+        try:
+            cal["path"].unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._set_recording_ui(False)
+        return True
 
     def _finish_calibration(self):
         cal, self.calibration = self.calibration, None
@@ -800,6 +1139,7 @@ class App:
 
     def _tick(self):
         dt = TICK_MS / 1000
+        self._poll_work_results()
         peaks = self.engine.take_peaks()
         selected = INPUT_CHOICES[self.input_var.get()]
         for ch, (level, hold, name, value, y0, y1) in enumerate(self.bars):
@@ -825,8 +1165,10 @@ class App:
 
         if self.engine.lost:
             if self.calibration is not None:
-                self.calibration = None
-                self.engine.stop_take()
+                self._abort_calibration()
+                messagebox.showwarning(
+                    "Calibration stopped",
+                    "The interface disconnected during calibration. Reconnect it and try again.")
             if self.engine.recording:
                 num = self.finish_take()
                 messagebox.showwarning("Take Recorder",
@@ -868,8 +1210,17 @@ class App:
             self.status.config(text=f"REC   take {self.current_num:03d}   "
                                     f"{fmt_time(self.engine.take_seconds())}",
                                bg=C["red"], fg="white")
+        elif self._polishing is not None:
+            job = self._polishing
+            self.status.config(text=f"POLISHING {job['mode'].upper()}   "
+                                    f"take {job['take'].num:03d}...",
+                               bg=C["yellow"], fg="#0d1117")
+        elif self._estimating_key is not None:
+            self.status.config(text="ANALYZING TRACK KEY...",
+                               bg=C["yellow"], fg="#0d1117")
         elif self.playing_num is not None and player is not None:
-            self.status.config(text=f"PLAY   take {self.playing_num:03d}   "
+            self.status.config(text=f"PLAY {self.playing_mode.upper()}   "
+                                    f"take {self.playing_num:03d}   "
                                     f"{fmt_time(player.seconds)} / {fmt_time(player.length)}",
                                bg=C["blue"], fg="#0d1117")
         elif flash and flash[1] > 0:
@@ -881,9 +1232,16 @@ class App:
             self.status.config(text="READY   Space to record", bg=C["panel"], fg=C["fg"])
 
     def on_close(self):
+        self._closing = True
+        if self._pending_play is not None:
+            self._pending_play["cancel"].set()
+        self._play_request_id += 1
+        self._pending_play = None
+        self._polishing = None
+        self._cancel_key_estimate()
+        self._work_queue.put(None)
         if self.calibration is not None:
-            self.calibration = None
-            self.engine.stop_take()
+            self._abort_calibration()
         if self.engine.recording:
             self.finish_take()
         self.engine.stop_playback()
