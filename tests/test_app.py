@@ -196,5 +196,17 @@ class PlaybackStateTest(unittest.TestCase):
             self.assertFalse(instance._abort_calibration())
 
 
+class SpeakerGuessTest(unittest.TestCase):
+    def test_skips_virtual_outputs_and_prefers_a_jack(self):
+        names = ["Speakers (Game Stream Virtual)", "Monitor (Display Audio)",
+                 "Line Out (Onboard Audio)"]
+        self.assertEqual(recorder_app.guess_speakers(names), "Line Out (Onboard Audio)")
+
+    def test_falls_back_to_first_real_output(self):
+        self.assertEqual(recorder_app.guess_speakers(["Monitor (Display Audio)"]),
+                         "Monitor (Display Audio)")
+        self.assertEqual(recorder_app.guess_speakers([]), "")
+
+
 if __name__ == "__main__":
     unittest.main()

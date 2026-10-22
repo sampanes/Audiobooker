@@ -61,5 +61,43 @@ class FindInputsTest(unittest.TestCase):
         self.assertEqual(engine.find_inputs(["Studio 26c"], devices, self.HOSTAPIS), [])
 
 
+class SpeakersTest(unittest.TestCase):
+    HOSTAPIS = FindInputsTest.HOSTAPIS
+
+    @staticmethod
+    def out(name, api, outputs=2):
+        return {"name": name, "hostapi": api, "max_output_channels": outputs}
+
+    DEVICES = [out.__func__("Line Out (Onboard Audio)", 0),
+               out.__func__("Line Out (Onboard Audio)", 2),
+               out.__func__("Line Out (Onboard Audio)", 3),
+               out.__func__("Main Out (Studio 26c)", 2),
+               out.__func__("Monitor (Display Audio)", 2),
+               out.__func__("Monitor (Display Audio)", 2),
+               out.__func__("Microphone (Webcam)", 2, outputs=0)]
+
+    def test_lists_other_wasapi_outputs_once(self):
+        names = engine.list_speakers(["Studio 26c"], self.DEVICES, self.HOSTAPIS)
+        self.assertEqual(names, ["Line Out (Onboard Audio)", "Monitor (Display Audio)"])
+
+    def test_finds_by_name_preferring_wasapi_and_skipping_ks(self):
+        found = engine.find_speakers("Line Out (Onboard Audio)", self.DEVICES, self.HOSTAPIS)
+        self.assertEqual(found, (1, "Windows WASAPI"))
+        self.assertEqual(engine.find_speakers("Nope", self.DEVICES, self.HOSTAPIS), (None, None))
+
+    def test_speaker_route_needs_a_device(self):
+        e = engine.Engine(["Studio 26c"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "t.wav")
+            sf.write(path, np.zeros((10, 1), dtype=np.float32), 48000)
+            with self.assertRaises(ValueError):
+                e.play(path, route="sideways")
+            with self.assertRaises(RuntimeError):
+                e.play(path, route="speakers", speakers="")
+            with self.assertRaises(RuntimeError):
+                e.play(path, route="both", speakers="Not A Real Output 12345")
+        self.assertIsNone(e.player)
+
+
 if __name__ == "__main__":
     unittest.main()

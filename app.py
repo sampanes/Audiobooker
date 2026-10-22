@@ -36,6 +36,8 @@ DEFAULTS = {
     "latency_ms": None,
     "track_gain": 0.7,
     "polish": "off",
+    "playback": "headphones",  # headphones | speakers | both
+    "speakers": "",  # output name for "speakers"; empty = best guess
 }
 INPUT_CHOICES = {"1": [0], "2": [1], "1+2": [0, 1]}
 SAMPLE_RATES = ("auto", "44100", "48000", "96000")
@@ -53,7 +55,7 @@ C = dict(bg="#1e1f22", panel="#2b2d31", fg="#e6e6e6", dim="#8a8f98", green="#3fb
          target="#24382a")
 
 HELP = ("Space record / stop   G / B good / bad   R retake   Backspace trash   "
-        "Ctrl+Z undo   P play   V sound good   S star")
+        "Ctrl+Z undo   P play   V sound good   O headphones / speakers   S star")
 
 CALIBRATE_HELP = (
     "This measures the delay between the backing track and your recording, so takes "
@@ -75,7 +77,23 @@ def load_settings():
         settings["polish"] = polish.normalize_mode(settings.get("polish", "off"))
     except (TypeError, ValueError):
         settings["polish"] = "off"
+    if settings.get("playback") not in engine.ROUTES:
+        settings["playback"] = "headphones"
     return settings
+
+
+SPEAKER_HINTS = ("speaker", "jack", "line out", "realtek", "headphone")
+NOT_SPEAKERS = ("virtual", "streaming", "voice", "cable", "vb-audio")
+
+
+def guess_speakers(names):
+    """Pick the likeliest real speaker output from a list of output names."""
+    def plain(name):
+        return not any(w in name.lower() for w in NOT_SPEAKERS)
+    for name in names:
+        if plain(name) and any(h in name.lower() for h in SPEAKER_HINTS):
+            return name
+    return next((n for n in names if plain(n)), names[0] if names else "")
 
 
 def save_settings(settings):
@@ -329,6 +347,24 @@ class App:
         tk.Label(playback, text="Key", bg=C["bg"], fg=C["dim"]).pack(side="right",
                  padx=(10, 4))
 
+        # Where playback goes. Recording over a track always uses the headphones.
+        route = tk.Frame(root, bg=C["bg"])
+        route.pack(fill="x", pady=(6, 0), **pad)
+        tk.Label(route, text="Play on (O)", bg=C["bg"], fg=C["dim"]).pack(side="left")
+        self.route_var = tk.StringVar(value=self.settings["playback"])
+        for value in engine.ROUTES:
+            ttk.Radiobutton(route, text=value.title(), value=value, variable=self.route_var,
+                            takefocus=0, command=self.on_route).pack(side="left", padx=(6, 0))
+        self.speakers_var = tk.StringVar()
+        self.speakers_box = ttk.Combobox(route, textvariable=self.speakers_var, width=34,
+                                         state="readonly", takefocus=0,
+                                         postcommand=self._refresh_speakers)
+        self.speakers_box.pack(side="right")
+        self.speakers_box.bind("<<ComboboxSelected>>", self.on_speakers)
+        tk.Label(route, text="Speakers", bg=C["bg"], fg=C["dim"]).pack(side="right",
+                 padx=(10, 4))
+        self._refresh_speakers()
+
         # Takes list
         cols = ("take", "length", "peak", "notes")
         self.tree = ttk.Treeview(root, columns=cols, show="headings", selectmode="browse")
@@ -393,6 +429,8 @@ class App:
                         ("<Return>", self.toggle_play),
                         ("<KeyPress-v>", self.cycle_polish),
                         ("<KeyPress-V>", self.cycle_polish),
+                        ("<KeyPress-o>", self.cycle_route),
+                        ("<KeyPress-O>", self.cycle_route),
                         ("<KeyPress-s>", self.toggle_star), ("<KeyPress-S>", self.toggle_star),
                         ("<KeyPress-g>", self.mark_good), ("<KeyPress-G>", self.mark_good),
                         ("<KeyPress-b>", self.mark_bad), ("<KeyPress-B>", self.mark_bad),
@@ -571,7 +609,7 @@ class App:
         auto = " (auto)" if self.engine.requested_rate == "auto" else ""
         self.device_label.config(
             text=f"{b.describe()}  |  {self.engine.samplerate} Hz{auto} / 24-bit WAV  |  {quality}\n"
-                 f"Playback: {self.engine.output_name()}   |   Takes: {self.song.dir}",
+                 f"Headphones: {self.engine.output_name()}   |   Takes: {self.song.dir}",
             fg=C["green"] if b.bit_perfect else C["yellow"])
 
     # ---- song / settings --------------------------------------------------
@@ -736,6 +774,51 @@ class App:
                 self._request_play(take, mode)
         elif changed:
             self.flash(f"Sound good: {mode.title()}")
+
+    def _refresh_speakers(self):
+        try:
+            names = engine.list_speakers(self.settings["device_match"])
+        except Exception:
+            names = []
+        saved = self.settings.get("speakers", "")
+        if saved and saved not in names:
+            names.append(saved)  # unplugged right now; keep the choice
+        self.speakers_box.config(values=names)
+        self.speakers_var.set(saved or guess_speakers(names))
+
+    def on_speakers(self, event=None):
+        self.settings["speakers"] = self.speakers_var.get()
+        save_settings(self.settings)
+        self.root.focus_set()
+        if self.route_var.get() != "headphones":
+            self._replay_on_new_route()
+
+    def on_route(self):
+        route = self.route_var.get()
+        if route not in engine.ROUTES:
+            route = "headphones"
+            self.route_var.set(route)
+        self.settings["playback"] = route
+        save_settings(self.settings)
+        self.root.focus_set()
+        if not self._replay_on_new_route():
+            self.flash(f"Play on: {route.title()}")
+
+    def cycle_route(self):
+        routes = engine.ROUTES
+        current = self.route_var.get()
+        index = routes.index(current) if current in routes else -1
+        self.route_var.set(routes[(index + 1) % len(routes)])
+        self.on_route()
+
+    def _replay_on_new_route(self):
+        """Restart the take that is playing so it comes out of the new output."""
+        active = self._active_audition()
+        take = self.song.get(active[0]) if active is not None else None
+        if take is None:
+            return False
+        self._request_play(take, active[1])
+        return True
 
     def cycle_polish(self):
         try:
@@ -1039,7 +1122,8 @@ class App:
         try:
             self.engine.play(str(path),
                              start_s=current.track_start if current.track else 0.0,
-                             backing=backing, track_gain=self.settings.get("track_gain", 0.7))
+                             backing=backing, track_gain=self.settings.get("track_gain", 0.7),
+                             route=self.route_var.get(), speakers=self.speakers_var.get())
         except Exception as exc:
             self._update_device_label()
             messagebox.showerror("Take Recorder", f"Could not play take {current.label}:\n{exc}")

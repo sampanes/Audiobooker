@@ -33,12 +33,19 @@ The app runs in a minimized console window titled `take-recorder`.
 | Ctrl+Z       | Undo trash                                                     |
 | P / Enter    | Play / stop the selected take (newest if none selected)        |
 | V            | Cycle Sound good playback: Off / Gentle / Strong               |
+| O            | Cycle where playback goes: Headphones / Speakers / Both        |
 | S            | Star a keeper                                                  |
 | Esc          | Stop playback                                                  |
 
 Raw recordings are never deleted: trashed takes move to `takes/<song>/trash/`.
 Take numbers are never reused, so `take_007.wav` always means the same take.
 Generated Sound good cache files are disposable and may be pruned or regenerated.
+
+**Play on** sends playback to the interface's headphones, to other speakers
+(say, a motherboard line-out), or to both at once. Pick the speakers once from
+the list; switching while a take plays restarts it on the new output.
+Recording over a backing track always plays the track in the headphones, so
+it never leaks into the mic.
 
 Each take starts 0.3 s *before* you press Space (pre-roll), so the breath or
 pickup isn't cut off. (Takes over a backing track use the count-in instead.)
@@ -130,6 +137,8 @@ recipe changes, and orphaned cache files are removed when the song opens.
 | `latency_ms`      | `null`                        | Set by Calibrate                           |
 | `track_gain`      | `0.7`                         | Track level under the vocal when playing back |
 | `polish`          | `"off"`                       | Sound good playback: `off`, `gentle`, or `strong` |
+| `playback`        | `"headphones"`                | Play on: `headphones`, `speakers`, or `both` |
+| `speakers`        | `""` (best guess)             | Output name used for speakers              |
 
 Per-song track settings (track file, start point, count-in and vocal key) live
 in `takes/<song>/song.json`; per-take details live in

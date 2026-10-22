@@ -109,6 +109,42 @@ def find_output(match, prefer_hostapi=None):
     return found[0][1], found[0][2]
 
 
+ROUTES = ("headphones", "speakers", "both")
+
+
+def list_speakers(match, devices=None, hostapis=None):
+    """Names of WASAPI outputs other than the interface (motherboard jack, monitors...)."""
+    devices = sd.query_devices() if devices is None else devices
+    hostapis = sd.query_hostapis() if hostapis is None else hostapis
+    terms = [t.lower() for t in match]
+    names = []
+    for dev in devices:
+        if dev["max_output_channels"] < 1 or "WASAPI" not in hostapis[dev["hostapi"]]["name"]:
+            continue
+        if any(t in dev["name"].lower() for t in terms) or dev["name"] in names:
+            continue
+        names.append(dev["name"])
+    return names
+
+
+def find_speakers(name, devices=None, hostapis=None):
+    """Return (device index, hostapi name) for an output by exact name, preferring WASAPI."""
+    devices = sd.query_devices() if devices is None else devices
+    hostapis = sd.query_hostapis() if hostapis is None else hostapis
+    found = []
+    for index, dev in enumerate(devices):
+        if dev["max_output_channels"] < 1 or dev["name"] != name:
+            continue
+        api = hostapis[dev["hostapi"]]["name"]
+        if "WDM-KS" in api:
+            continue
+        found.append((0 if "WASAPI" in api else 1, index, api))
+    if not found:
+        return None, None
+    found.sort()
+    return found[0][1], found[0][2]
+
+
 def windows_mix_rate(match):
     """The rate Windows runs the interface's output at, or None.
 
@@ -419,6 +455,7 @@ class Engine:
         self._in_origins = deque(maxlen=256)
         self._peaks = np.zeros(METER_CHANNELS)
         self._player = None
+        self._extra_players = []  # speakers, when playing to both
         self._out_device = None
         self._out_hostapi = None
 
@@ -599,15 +636,40 @@ class Engine:
 
     # ---- playback -----------------------------------------------------
 
-    def play(self, path, start_s=0.0, backing=None, track_gain=0.7):
-        """Play a take from start_s; with backing=(data, rate), mix the track underneath."""
+    def play(self, path, start_s=0.0, backing=None, track_gain=0.7,
+             route="headphones", speakers=None):
+        """Play a take from start_s; with backing=(data, rate), mix the track underneath.
+
+        route is "headphones" (the interface), "speakers" (the output named by
+        `speakers`) or "both" at once.
+        """
         self._stop_player()
+        if route not in ROUTES:
+            raise ValueError(f"unknown playback route {route!r}")
+        spk_device = spk_hostapi = None
+        if route != "headphones":
+            spk_device, spk_hostapi = find_speakers(speakers) if speakers else (None, None)
+            if spk_device is None:
+                raise RuntimeError(f"Speakers not found: {speakers or 'none chosen'}. "
+                                   "Pick them in the Speakers list.")
         data, rate = sf.read(path, dtype="float32", always_2d=True)
         data = data[int(round(start_s * rate)):]
         if data.shape[1] == 1:
             data = np.repeat(data, 2, axis=1)  # mono take to both ears
         if backing is not None:
             data = mix_audition(data, rate, backing[0], backing[1], start_s, track_gain)
+        if route == "speakers":
+            self._player = Player(data, rate, spk_device, spk_hostapi)
+            return
+        self._play_headphones(data, rate)
+        if route == "both":
+            try:
+                self._extra_players.append(Player(data, rate, spk_device, spk_hostapi))
+            except Exception:
+                self._stop_player()
+                raise
+
+    def _play_headphones(self, data, rate):
         try:
             self._player = Player(data, rate, self._out_device, self._out_hostapi)
         except Exception:
@@ -626,9 +688,11 @@ class Engine:
                 raise
 
     def _stop_player(self):
-        player, self._player = self._player, None
-        if player is not None:
-            player.stop()
+        players = [self._player] + self._extra_players
+        self._player, self._extra_players = None, []
+        for player in players:
+            if player is not None:
+                player.stop()
 
     def stop_playback(self):
         """Stop playback and bring the input back if playback had to pause it."""
