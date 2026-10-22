@@ -23,19 +23,20 @@ The app runs in a minimized console window titled `take-recorder`.
 
 ## Keys
 
-| Key          | Action                                                         |
-|--------------|----------------------------------------------------------------|
-| Space        | Record / stop                                                  |
-| G            | Last take was GOOD: star it (while recording: stop + star)     |
-| B            | Last take was BAD: trash it (while recording: stop + trash)    |
-| R            | Retake: trash the take you just did and record again (asks first if it is 20 s+, never trashes a starred take) |
-| Backspace    | Trash the selected take (while recording: abort this take)     |
-| Ctrl+Z       | Undo trash                                                     |
-| P / Enter    | Play / stop the selected take (newest if none selected)        |
-| V            | Cycle Sound good playback: Off / Gentle / Strong               |
-| O            | Cycle where playback goes: Headphones / Speakers / Both        |
-| S            | Star a keeper                                                  |
-| Esc          | Stop playback                                                  |
+| Key    | Action                                                                     |
+|--------|----------------------------------------------------------------------------|
+| Space  | Record / stop                                                              |
+| G      | GOOD: star the take (press again to unstar; on a trashed take, restores it)  |
+| B      | BAD: trash the take                                                        |
+| P      | Play / stop the selected take (newest if none selected)                    |
+| Ctrl+Z | Undo the last trash                                                        |
+| V      | Cycle Sound good playback: Off / Gentle / Strong                           |
+| O      | Cycle where playback goes: Headphones / Speakers / Both                    |
+
+G and B judge, in order: the take you are recording (stopping it first), the
+take selected in the list, or the take you just finished. A new take is
+selected as soon as it stops, so Space then G or B always judges what you just
+sang. Clicking an older take lets G or B judge that one instead.
 
 The bar at the top of the window says where your keystrokes go: green **KEYS ON**
 means they control the recorder, yellow means you are typing in a text box, and

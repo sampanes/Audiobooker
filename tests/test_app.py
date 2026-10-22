@@ -196,50 +196,80 @@ class PlaybackStateTest(unittest.TestCase):
             self.assertFalse(instance._abort_calibration())
 
 
-class RetakeGuardTest(unittest.TestCase):
-    def app_with_last_take(self, seconds, starred=False):
+class VerdictTest(unittest.TestCase):
+    """G/B judge the take being recorded, else the selected take, else the last take."""
+
+    def make(self, selected=None, last=None, recording=False):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        song = Song(self._tmp.name, "demo")
+        for _ in range(3):
+            num, path = song.next_path()
+            sf.write(str(path), np.zeros((10, 1), dtype=np.float32), 48000, subtype="PCM_24")
+            song.record(num, 1.0, -20.0, False, 0)
         instance = recorder_app.App.__new__(recorder_app.App)
-        instance.engine = mock.Mock(recording=False)
-        instance.last_recorded = 4
-        take = SimpleNamespace(num=4, label="004", seconds=seconds, starred=starred,
-                               trashed=False)
-        instance.song = mock.Mock()
-        instance.song.get.return_value = take
-        instance._trash_num = mock.Mock()
-        instance.toggle_record = mock.Mock()
+        instance.song = song
+        instance.engine = mock.Mock(recording=recording)
+        instance.current_num = None
+        instance.last_recorded = last
+        instance.playing_num = None
+        instance.undo_stack = []
+        instance.tree = mock.Mock()
+        instance.tree.selection.return_value = (str(selected),) if selected else ()
         instance.flash = mock.Mock()
+        instance.refresh_takes = mock.Mock()
+        instance._active_audition = mock.Mock(return_value=None)
+        instance.finish_take = mock.Mock(return_value=3)
         return instance
 
-    def test_starred_take_is_never_retaken(self):
-        instance = self.app_with_last_take(5.0, starred=True)
-        with mock.patch.object(recorder_app.messagebox, "askyesno") as ask:
-            instance.retake()
-        ask.assert_not_called()
-        instance._trash_num.assert_not_called()
-        instance.toggle_record.assert_not_called()
+    def test_selected_take_beats_last_take(self):
+        instance = self.make(selected=1, last=3)
+        instance.mark_good()
+        self.assertTrue(instance.song.get(1).starred)
+        self.assertFalse(instance.song.get(3).starred)
 
-    def test_short_take_retakes_without_asking(self):
-        instance = self.app_with_last_take(5.0)
-        with mock.patch.object(recorder_app.messagebox, "askyesno") as ask:
-            instance.retake()
-        ask.assert_not_called()
-        instance._trash_num.assert_called_once_with(4)
-        instance.toggle_record.assert_called_once_with()
+    def test_bad_with_nothing_selected_trashes_last_take_only_once(self):
+        instance = self.make(last=3)
+        instance.mark_bad()
+        instance.mark_bad()  # mashing B must not walk back through older takes
+        self.assertEqual([t.num for t in instance.song.takes() if t.trashed], [3])
 
-    def test_long_take_asks_and_no_keeps_it(self):
-        instance = self.app_with_last_take(85.0)
-        with mock.patch.object(recorder_app.messagebox, "askyesno", return_value=False) as ask:
-            instance.retake()
-        ask.assert_called_once()
-        instance._trash_num.assert_not_called()
-        instance.toggle_record.assert_not_called()
+    def test_good_twice_unstars_and_good_restores_from_trash(self):
+        instance = self.make(selected=2)
+        instance.mark_good()
+        instance.mark_good()
+        self.assertFalse(instance.song.get(2).starred)
+        instance.song.trash(2)
+        instance.mark_good()
+        self.assertFalse(instance.song.get(2).trashed)
+        self.assertTrue(instance.song.get(2).starred)
 
-    def test_long_take_asks_and_yes_retakes(self):
-        instance = self.app_with_last_take(85.0)
-        with mock.patch.object(recorder_app.messagebox, "askyesno", return_value=True):
-            instance.retake()
-        instance._trash_num.assert_called_once_with(4)
-        instance.toggle_record.assert_called_once_with()
+    def test_while_recording_judges_the_new_take(self):
+        instance = self.make(selected=1, recording=True)
+        instance.mark_good()
+        instance.finish_take.assert_called_once_with()
+        self.assertTrue(instance.song.get(3).starred)
+        self.assertFalse(instance.song.get(1).starred)
+
+
+class FocusBannerTest(unittest.TestCase):
+    def check(self, focused, alpha, text):
+        instance = recorder_app.App.__new__(recorder_app.App)
+        instance._focus_state = None
+        instance.root = mock.Mock()
+        instance.root.focus_get.return_value = focused
+        instance.focus_label = mock.Mock()
+        instance._update_focus()
+        instance.root.attributes.assert_called_once_with("-alpha", alpha)
+        self.assertIn(text, instance.focus_label.config.call_args.kwargs["text"])
+        instance._update_focus()  # no change: nothing redrawn
+        instance.root.attributes.assert_called_once()
+
+    def test_other_window_fades(self):
+        self.check(None, recorder_app.UNFOCUSED_ALPHA, "another window")
+
+    def test_focused_is_crisp(self):
+        self.check(object(), 1.0, "KEYS ON")
 
 
 class SpeakerGuessTest(unittest.TestCase):

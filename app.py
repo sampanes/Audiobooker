@@ -49,15 +49,14 @@ METER_MIN_DB = -60.0
 DECAY_DB_PER_S = 24.0
 HOLD_S = 1.5
 TICK_MS = 33
-RETAKE_CONFIRM_S = 20.0  # R asks before throwing away a take at least this long
 UNFOCUSED_ALPHA = 0.55  # window opacity while the keyboard goes somewhere else
 
 C = dict(bg="#1e1f22", panel="#2b2d31", fg="#e6e6e6", dim="#8a8f98", green="#3fb950",
          yellow="#d29922", red="#f85149", blue="#58a6ff", gold="#e3b341", grey="#5c6370",
          target="#24382a")
 
-HELP = ("Space record / stop   G / B good / bad   R retake   Backspace trash   "
-        "Ctrl+Z undo   P play   V sound good   O headphones / speakers   S star")
+HELP = ("Space record / stop    G good    B bad    P play / stop    "
+        "Ctrl+Z undo    V sound good    O headphones / speakers")
 
 CALIBRATE_HELP = (
     "This measures the delay between the backing track and your recording, so takes "
@@ -317,10 +316,7 @@ class App:
         self.buttons = {}
         for key, text, cmd in (
                 ("rec", "Record (Space)", self.toggle_record),
-                ("retake", "Retake (R)", self.retake),
-                ("trash", "Trash (Bksp)", self.trash),
-                ("undo", "Undo trash (Ctrl+Z)", self.undo_trash),
-                ("star", "Star (S)", self.toggle_star)):
+                ("undo", "Undo trash (Ctrl+Z)", self.undo_trash)):
             b = ttk.Button(bar, text=text, takefocus=0, command=self._act(cmd))
             b.pack(side="left", padx=(0, 6))
             self.buttons[key] = b
@@ -386,6 +382,7 @@ class App:
         self.tree.tag_configure("bad", foreground=C["red"])
         self.tree.pack(fill="both", expand=True, pady=(10, 6), **pad)
         self.tree.bind("<Double-1>", lambda e: self._act(self.toggle_play)())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._update_verdict())
 
         tk.Label(root, text=HELP, bg=C["bg"], fg=C["dim"], font=("Segoe UI", 9)).pack(**pad)
 
@@ -429,19 +426,14 @@ class App:
 
     def _bind_keys(self):
         for seq, fn in (("<space>", self.toggle_record),
-                        ("<KeyPress-r>", self.retake), ("<KeyPress-R>", self.retake),
-                        ("<BackSpace>", self.trash), ("<Delete>", self.trash),
                         ("<Control-z>", self.undo_trash), ("<Control-Z>", self.undo_trash),
                         ("<KeyPress-p>", self.toggle_play), ("<KeyPress-P>", self.toggle_play),
-                        ("<Return>", self.toggle_play),
                         ("<KeyPress-v>", self.cycle_polish),
                         ("<KeyPress-V>", self.cycle_polish),
                         ("<KeyPress-o>", self.cycle_route),
                         ("<KeyPress-O>", self.cycle_route),
-                        ("<KeyPress-s>", self.toggle_star), ("<KeyPress-S>", self.toggle_star),
                         ("<KeyPress-g>", self.mark_good), ("<KeyPress-G>", self.mark_good),
-                        ("<KeyPress-b>", self.mark_bad), ("<KeyPress-B>", self.mark_bad),
-                        ("<Escape>", self.stop_playback)):
+                        ("<KeyPress-b>", self.mark_bad), ("<KeyPress-B>", self.mark_bad)):
             self.root.bind_all(seq, self._hotkey(self._act(fn)))
 
     def _hotkey(self, fn):
@@ -939,58 +931,34 @@ class App:
         for w in self.input_buttons + self.track_widgets:
             w.config(state=state)
         self.buttons["rec"].config(text="Stop (Space)" if recording else "Record (Space)")
-        self.buttons["trash"].config(text="Abort take (Bksp)" if recording else "Trash (Bksp)")
         self._update_verdict()
 
-    def retake(self):
+    def _judge_num(self):
+        """G/B judge the take being recorded, else the selected take, else the last one."""
         if self.engine.recording:
-            if not self._confirm_retake(self.current_num, self.engine.take_seconds()):
-                return
-            num = self.finish_take()
-            if num is not None:
-                self._trash_num(num)
-        elif self.last_recorded is not None:
-            take = self.song.get(self.last_recorded)
-            if take is not None and not take.trashed:
-                if take.starred:
-                    self.flash(f"Take {take.label} is starred -- R won't trash a keeper")
-                    return
-                if not self._confirm_retake(take.num, take.seconds):
-                    return
-                self._trash_num(take.num)
-        self.toggle_record()
-
-    def _confirm_retake(self, num, seconds):
-        if seconds < RETAKE_CONFIRM_S:
-            return True
-        ok = messagebox.askyesno(
-            "Take Recorder", f"Trash take {num:03d} ({fmt_clock(seconds)} long) and "
-            "record it again?", default=messagebox.NO)
-        print(f"[retake] take {num:03d} {seconds:.1f}s: {'yes' if ok else 'kept'}")
-        return ok
-
-    def trash(self):
-        if self.engine.recording:
-            num = self.finish_take()
-            if num is not None:
-                self._trash_num(num)
-            return
-        take = self.target_take()
-        if take is None or take.trashed:
-            return
-        if self.playing_num == take.num:
-            self.stop_playback()
-        self._trash_num(take.num)
-
-    def _verdict_take(self):
-        """G/B act on the take being recorded (stopping it) or the one just recorded."""
-        if self.engine.recording:
-            return self.finish_take()
+            return self.current_num
+        sel = self.tree.selection()
+        if sel:
+            return int(sel[0])
         return self.last_recorded
 
+    def _verdict_take(self):
+        if self.engine.recording:
+            return self.finish_take()  # stop it, then judge it
+        return self._judge_num()
+
     def mark_good(self):
+        recording = self.engine.recording
         num = self._verdict_take()
-        if num is None:
+        take = self.song.get(num) if num is not None else None
+        if take is None:
+            return
+        if take.trashed:
+            self.song.restore(num)  # GOOD on a trashed take brings it back
+        elif take.starred and not recording:
+            self.song.set_star(num, False)  # G again takes the star back off
+            self.flash(f"Take {num:03d}  no longer GOOD")
+            self.refresh_takes(select=num)
             return
         self.song.set_star(num, True)
         self.flash(f"Take {num:03d}  GOOD")
@@ -998,7 +966,8 @@ class App:
 
     def mark_bad(self):
         num = self._verdict_take()
-        if num is None:
+        take = self.song.get(num) if num is not None else None
+        if take is None or take.trashed:
             return
         if self.playing_num == num:
             self.stop_playback()
@@ -1010,10 +979,13 @@ class App:
         if self.engine.recording and self.current_num is not None:
             text, fg, state = (f"Recording take {self.current_num:03d}  --  "
                                "G keeps it, B scraps it", C["fg"], "normal")
-        elif self.last_recorded is not None:
-            take = self.song.get(self.last_recorded)
-            mark = "  GOOD" if take is not None and take.starred else ""
-            text, fg, state = f"Last take {self.last_recorded:03d}{mark}", C["fg"], "normal"
+        elif self._judge_num() is not None:
+            num = self._judge_num()
+            take = self.song.get(num)
+            which = "Last take" if num == self.last_recorded else "Selected take"
+            mark = ("  (trash)" if take is not None and take.trashed else
+                    "  GOOD" if take is not None and take.starred else "")
+            text, fg, state = f"{which} {num:03d}{mark}", C["fg"], "normal"
         else:
             text, fg, state = "No take to judge yet", C["dim"], "disabled"
         self.verdict_label.config(text=text, fg=fg)
@@ -1042,12 +1014,6 @@ class App:
                 self.flash(f"Take {num:03d} restored")
                 self.refresh_takes(select=num)
                 return
-
-    def toggle_star(self):
-        take = self.target_take()
-        if take is not None:
-            self.song.toggle_star(take.num)
-            self.refresh_takes(select=take.num)
 
     def refresh_takes(self, select=None):
         keep = select if select is not None else (
