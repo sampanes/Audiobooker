@@ -196,6 +196,52 @@ class PlaybackStateTest(unittest.TestCase):
             self.assertFalse(instance._abort_calibration())
 
 
+class RetakeGuardTest(unittest.TestCase):
+    def app_with_last_take(self, seconds, starred=False):
+        instance = recorder_app.App.__new__(recorder_app.App)
+        instance.engine = mock.Mock(recording=False)
+        instance.last_recorded = 4
+        take = SimpleNamespace(num=4, label="004", seconds=seconds, starred=starred,
+                               trashed=False)
+        instance.song = mock.Mock()
+        instance.song.get.return_value = take
+        instance._trash_num = mock.Mock()
+        instance.toggle_record = mock.Mock()
+        instance.flash = mock.Mock()
+        return instance
+
+    def test_starred_take_is_never_retaken(self):
+        instance = self.app_with_last_take(5.0, starred=True)
+        with mock.patch.object(recorder_app.messagebox, "askyesno") as ask:
+            instance.retake()
+        ask.assert_not_called()
+        instance._trash_num.assert_not_called()
+        instance.toggle_record.assert_not_called()
+
+    def test_short_take_retakes_without_asking(self):
+        instance = self.app_with_last_take(5.0)
+        with mock.patch.object(recorder_app.messagebox, "askyesno") as ask:
+            instance.retake()
+        ask.assert_not_called()
+        instance._trash_num.assert_called_once_with(4)
+        instance.toggle_record.assert_called_once_with()
+
+    def test_long_take_asks_and_no_keeps_it(self):
+        instance = self.app_with_last_take(85.0)
+        with mock.patch.object(recorder_app.messagebox, "askyesno", return_value=False) as ask:
+            instance.retake()
+        ask.assert_called_once()
+        instance._trash_num.assert_not_called()
+        instance.toggle_record.assert_not_called()
+
+    def test_long_take_asks_and_yes_retakes(self):
+        instance = self.app_with_last_take(85.0)
+        with mock.patch.object(recorder_app.messagebox, "askyesno", return_value=True):
+            instance.retake()
+        instance._trash_num.assert_called_once_with(4)
+        instance.toggle_record.assert_called_once_with()
+
+
 class SpeakerGuessTest(unittest.TestCase):
     def test_skips_virtual_outputs_and_prefers_a_jack(self):
         names = ["Speakers (Game Stream Virtual)", "Monitor (Display Audio)",

@@ -49,6 +49,8 @@ METER_MIN_DB = -60.0
 DECAY_DB_PER_S = 24.0
 HOLD_S = 1.5
 TICK_MS = 33
+RETAKE_CONFIRM_S = 20.0  # R asks before throwing away a take at least this long
+UNFOCUSED_ALPHA = 0.55  # window opacity while the keyboard goes somewhere else
 
 C = dict(bg="#1e1f22", panel="#2b2d31", fg="#e6e6e6", dim="#8a8f98", green="#3fb950",
          yellow="#d29922", red="#f85149", blue="#58a6ff", gold="#e3b341", grey="#5c6370",
@@ -142,6 +144,7 @@ class App:
         self.last_recorded = None
         self.calibration = None
         self._flash = None
+        self._focus_state = None
         self.playing_num = None
         self.playing_mode = None
         self._play_request_id = 0
@@ -205,6 +208,10 @@ class App:
         pad = dict(padx=14)
         entry_opts = dict(bg=C["panel"], fg=C["fg"], insertbackground=C["fg"], relief="flat",
                           disabledbackground=C["panel"], disabledforeground=C["dim"])
+
+        # Says whether keystrokes are going to the recorder right now
+        self.focus_label = tk.Label(root, text="", font=("Segoe UI", 9, "bold"), pady=3)
+        self.focus_label.pack(fill="x")
 
         # Song + input selection
         top = tk.Frame(root, bg=C["bg"])
@@ -937,12 +944,30 @@ class App:
 
     def retake(self):
         if self.engine.recording:
+            if not self._confirm_retake(self.current_num, self.engine.take_seconds()):
+                return
             num = self.finish_take()
             if num is not None:
                 self._trash_num(num)
         elif self.last_recorded is not None:
-            self._trash_num(self.last_recorded)
+            take = self.song.get(self.last_recorded)
+            if take is not None and not take.trashed:
+                if take.starred:
+                    self.flash(f"Take {take.label} is starred -- R won't trash a keeper")
+                    return
+                if not self._confirm_retake(take.num, take.seconds):
+                    return
+                self._trash_num(take.num)
         self.toggle_record()
+
+    def _confirm_retake(self, num, seconds):
+        if seconds < RETAKE_CONFIRM_S:
+            return True
+        ok = messagebox.askyesno(
+            "Take Recorder", f"Trash take {num:03d} ({fmt_clock(seconds)} long) and "
+            "record it again?", default=messagebox.NO)
+        print(f"[retake] take {num:03d} {seconds:.1f}s: {'yes' if ok else 'kept'}")
+        return ok
 
     def trash(self):
         if self.engine.recording:
@@ -1225,8 +1250,37 @@ class App:
             traceback.print_exc()  # keep the meter alive; the console shows what broke
         self.root.after(TICK_MS, self.tick)
 
+    def _update_focus(self):
+        """Crisp with a green banner when hotkeys land here; faded when they don't."""
+        try:
+            widget = self.root.focus_get()
+        except KeyError:
+            widget = self.root  # a combobox list is open: still this window
+        if widget is None:
+            state = "away"
+        elif isinstance(widget, (tk.Entry, ttk.Entry)):
+            state = "typing"
+        else:
+            state = "keys"
+        if state == self._focus_state:
+            return
+        self._focus_state = state
+        text, bg, fg = {
+            "keys": ("KEYS ON  --  your keystrokes control the recorder", C["green"], "#0d1117"),
+            "typing": ("TYPING  --  hotkeys off until you press Enter or Esc", C["yellow"],
+                       "#0d1117"),
+            "away": ("Keys go to another window  --  click here to use the hotkeys",
+                     C["panel"], C["dim"]),
+        }[state]
+        self.focus_label.config(text=text, bg=bg, fg=fg)
+        try:
+            self.root.attributes("-alpha", UNFOCUSED_ALPHA if state == "away" else 1.0)
+        except tk.TclError:
+            pass
+
     def _tick(self):
         dt = TICK_MS / 1000
+        self._update_focus()
         self._poll_work_results()
         peaks = self.engine.take_peaks()
         selected = INPUT_CHOICES[self.input_var.get()]

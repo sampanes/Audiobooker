@@ -28,7 +28,7 @@ The app runs in a minimized console window titled `take-recorder`.
 | Space        | Record / stop                                                  |
 | G            | Last take was GOOD: star it (while recording: stop + star)     |
 | B            | Last take was BAD: trash it (while recording: stop + trash)    |
-| R            | Retake: trash the take you just did and start recording again  |
+| R            | Retake: trash the take you just did and record again (asks first if it is 20 s+, never trashes a starred take) |
 | Backspace    | Trash the selected take (while recording: abort this take)     |
 | Ctrl+Z       | Undo trash                                                     |
 | P / Enter    | Play / stop the selected take (newest if none selected)        |
@@ -36,6 +36,10 @@ The app runs in a minimized console window titled `take-recorder`.
 | O            | Cycle where playback goes: Headphones / Speakers / Both        |
 | S            | Star a keeper                                                  |
 | Esc          | Stop playback                                                  |
+
+The bar at the top of the window says where your keystrokes go: green **KEYS ON**
+means they control the recorder, yellow means you are typing in a text box, and
+when another window has the keyboard the recorder fades out.
 
 Raw recordings are never deleted: trashed takes move to `takes/<song>/trash/`.
 Take numbers are never reused, so `take_007.wav` always means the same take.
