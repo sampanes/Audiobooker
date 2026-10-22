@@ -7,6 +7,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 import traceback
 from datetime import date
@@ -22,6 +23,7 @@ from takes import TRACK_EXTENSIONS, Song
 HERE = Path(__file__).resolve().parent
 SETTINGS_PATH = HERE / "settings.json"
 PID_PATH = HERE / "take-recorder.pid"
+LOG_PATH = HERE / "take-recorder.log"
 PROCESS_TITLE = "take-recorder"
 
 DEFAULTS = {
@@ -378,6 +380,7 @@ class App:
         """Wrap a button/hotkey action so it does nothing while calibrating."""
         def run():
             if self.calibration is None:
+                print(f"[action] {fn.__name__}")
                 fn()
         return run
 
@@ -1128,6 +1131,7 @@ class App:
         self.clip_label.config(bg=C["panel"], fg=C["dim"])
 
     def flash(self, text):
+        print(f"[flash] {text}")
         self._flash = (text, 2.5)
 
     def tick(self):
@@ -1251,7 +1255,43 @@ class App:
         self.root.destroy()
 
 
+class _Log:
+    """Copy console output to take-recorder.log, one timestamped line at a time."""
+
+    def __init__(self, console, file):
+        self.console, self.file, self._line_start = console, file, True
+
+    def write(self, text):
+        if self.console is not None:
+            try:
+                self.console.write(text)
+            except (OSError, ValueError):
+                pass
+        for part in text.splitlines(keepends=True):
+            if self._line_start:
+                self.file.write(time.strftime("%H:%M:%S "))
+            self.file.write(part)
+            self._line_start = part.endswith("\n")
+        self.file.flush()
+        return len(text)
+
+    def flush(self):
+        self.file.flush()
+
+
+def start_log():
+    """Send prints, warnings and every uncaught error (any thread) to the log."""
+    file = open(LOG_PATH, "a", encoding="ascii", errors="backslashreplace", buffering=1)
+    sys.stdout = _Log(sys.stdout, file)
+    sys.stderr = _Log(sys.stderr, file)
+    sys.excepthook = lambda *exc: traceback.print_exception(*exc)
+    threading.excepthook = lambda args: (
+        print(f"[thread error] {args.thread.name if args.thread else '?'}", file=sys.stderr),
+        traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback))
+
+
 def main():
+    start_log()
     if sys.platform == "win32":
         try:
             ctypes.windll.kernel32.SetConsoleTitleW(PROCESS_TITLE)
@@ -1263,6 +1303,7 @@ def main():
     print(f"[{PROCESS_TITLE}] pid {os.getpid()} -- close the window or run stop.bat to quit")
 
     root = tk.Tk()
+    root.report_callback_exception = lambda *exc: traceback.print_exception(*exc)
     App(root, load_settings())
     root.mainloop()
 
