@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -25,7 +26,15 @@ def dominant_frequency(signal, rate, expected):
 
 class SettingsTest(unittest.TestCase):
     def test_modes_and_keys_are_normalized(self):
-        self.assertEqual(polish.normalize_mode(" Strong "), "strong")
+        self.assertEqual(polish.normalize_mode(" Lots-None "), "lots-none")
+        self.assertEqual(polish.normalize_mode("strong"), "lots-lots")  # old name
+        self.assertEqual(polish.normalize_mode("gentle"), "some-some")  # old name
+        self.assertEqual(polish.normalize_mode("none-none"), "off")
+        self.assertEqual(polish.split_mode("some-lots"), ("some", "lots"))
+        self.assertEqual(polish.split_mode("off"), ("none", "none"))
+        self.assertEqual(polish.join_mode("none", "none"), "off")
+        self.assertEqual(polish.join_mode("lots", "some"), "lots-some")
+        self.assertEqual(len(polish.MODES), 9)
         self.assertEqual(polish.parse_key("a MINOR").name, "A minor")
         self.assertIsNone(polish.parse_key("Chromatic"))
         self.assertEqual(polish.parse_key("Db major").root, 1)
@@ -40,10 +49,12 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(polish.snap_midi(68.8, "A minor"), 69.0)
 
     def test_recipe_hash_is_stable_and_sensitive(self):
-        first = polish.recipe_hash("gentle", "A minor")
+        first = polish.recipe_hash("some-some", "A minor")
         self.assertEqual(first, polish.recipe_hash("GENTLE", polish.parse_key("A minor")))
-        self.assertNotEqual(first, polish.recipe_hash("strong", "A minor"))
-        self.assertNotEqual(first, polish.recipe_hash("gentle", "A major"))
+        self.assertNotEqual(first, polish.recipe_hash("lots-lots", "A minor"))
+        self.assertNotEqual(first, polish.recipe_hash("some-some", "A major"))
+        hashes = {polish.recipe_hash(mode, "A minor") for mode in polish.MODES}
+        self.assertEqual(len(hashes), len(polish.MODES))
 
 
 class RenderTest(unittest.TestCase):
@@ -67,7 +78,7 @@ class RenderTest(unittest.TestCase):
         tail = np.zeros((1200, 2), dtype=np.float32)
         source = np.concatenate((silence, np.repeat(tone, 2, axis=1), tail))
         original = source.copy()
-        made = polish.render(source, self.RATE, "gentle", "Chromatic")
+        made = polish.render(source, self.RATE, "some-some", "Chromatic")
         self.assertEqual(made.shape, source.shape)
         self.assertEqual(made.dtype, np.float32)
         np.testing.assert_array_equal(made[:len(silence)], silence)
@@ -79,8 +90,8 @@ class RenderTest(unittest.TestCase):
         target = 440.0
         flat = target * 2.0 ** (-35.0 / 1200.0)
         source = self.tone(flat)
-        gentle = polish.render(source, self.RATE, "gentle", "Chromatic")
-        strong = polish.render(source, self.RATE, "strong", "Chromatic")
+        gentle = polish.render(source, self.RATE, "some-none", "Chromatic")
+        strong = polish.render(source, self.RATE, "lots-none", "Chromatic")
         trim = int(0.15 * self.RATE)
         gentle_hz = dominant_frequency(gentle[trim:-trim], self.RATE, target)
         strong_hz = dominant_frequency(strong[trim:-trim], self.RATE, target)
@@ -88,6 +99,24 @@ class RenderTest(unittest.TestCase):
         strong_cents = 1200.0 * np.log2(strong_hz / target)
         self.assertAlmostEqual(strong_cents, 0.0, delta=5.0)
         self.assertAlmostEqual(gentle_cents, -17.5, delta=7.0)
+
+    def test_tone_alone_leaves_pitch_alone(self):
+        target = 440.0
+        flat = target * 2.0 ** (-35.0 / 1200.0)
+        source = self.tone(flat)
+        made = polish.render(source, self.RATE, "none-lots", "Chromatic")
+        trim = int(0.15 * self.RATE)
+        hz = dominant_frequency(made[trim:-trim], self.RATE, flat)
+        self.assertAlmostEqual(1200.0 * np.log2(hz / flat), 0.0, delta=3.0)
+        self.assertFalse(np.allclose(made, source))
+
+    def test_pitch_alone_skips_the_tone_chain(self):
+        source = self.tone(440.0)
+        with mock.patch.object(polish, "_spectral_polish") as eq, \
+                mock.patch.object(polish, "_compress") as comp:
+            polish.render(source, self.RATE, "lots-none", "Chromatic")
+        eq.assert_not_called()
+        comp.assert_not_called()
 
     def test_long_stereo_render_is_finite_bounded_and_same_shape(self):
         seconds = 6.0
@@ -100,7 +129,7 @@ class RenderTest(unittest.TestCase):
         source[:1200] = 0.0
         source[-1200:] = 0.0
 
-        made = polish.render(source, self.RATE, "strong", "A major")
+        made = polish.render(source, self.RATE, "lots-lots", "A major")
 
         self.assertEqual(made.shape, source.shape)
         self.assertEqual(made.dtype, np.float32)
@@ -119,7 +148,7 @@ class RenderTest(unittest.TestCase):
             return calls >= 8
 
         with self.assertRaises(polish.RenderCancelled):
-            polish.render(source, self.RATE, "strong", "Chromatic", cancel=cancel)
+            polish.render(source, self.RATE, "lots-lots", "Chromatic", cancel=cancel)
         self.assertEqual(calls, 8)
 
 

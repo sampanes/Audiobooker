@@ -53,7 +53,7 @@ UNFOCUSED_ALPHA = 0.55  # window opacity while the keyboard goes somewhere else
 C = dict(ui.C, stripe="#22252a")
 
 REC_TEXT, STOP_TEXT = "\u25cf  Record   Space", "\u25a0  Stop   Space"
-PLAY_TEXT, STOP_PLAY_TEXT = "\u25b6  Play   P", "\u25a0  Stop   P"
+PLAY_TEXT, STOP_PLAY_TEXT = "\u25ba  Play   P", "\u25a0  Stop   P"
 
 CALIBRATE_HELP = (
     "This measures the delay between the backing track and your recording, so takes "
@@ -171,103 +171,89 @@ class App:
         self.scale = ui.scale_for(root)
         px = self.px
         ui.apply_theme(root, px)
-        root.minsize(px(780), px(700))
+        root.minsize(px(760), px(640))
 
         # Says whether keystrokes are going to the recorder right now
         self.focus_label = tk.Label(root, text="", font=("Segoe UI", 9, "bold"), pady=px(3))
         self.focus_label.pack(fill="x")
-
-        # Device status. Packed before the body so a short window squeezes the
-        # takes list, never this line.
-        foot = tk.Frame(root, bg=C["panel"], padx=px(14), pady=px(6))
-        foot.pack(fill="x", side="bottom")
-        self.device_dot = tk.Label(foot, text="\u25cf", bg=C["panel"], fg=C["grey"],
-                                   font=("Segoe UI", 10))
-        ttk.Button(foot, text="Reconnect", style="Small.TButton", takefocus=0,
-                   command=self._act(lambda: self.connect(refresh=True))).pack(side="right")
-        self.device_dot.pack(side="left", anchor="n")
-        self.device_label = ui.label(foot, "", size=9, anchor="w", justify="left")
-        self.device_label.pack(side="left", fill="x", expand=True, padx=(px(6), 0))
 
         body = tk.Frame(root, bg=C["bg"], padx=px(14), pady=px(10))
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
         gap = dict(sticky="ew", pady=(0, px(8)))
 
-        # ---- setup card: song, input, track --------------------------------
-        setup = ui.card(body, px)
-        setup.grid(row=0, column=0, **gap)
-        setup.columnconfigure(1, weight=1)
-
-        ui.label(setup, "SONG", size=8, weight="bold").grid(row=0, column=0, sticky="w")
-        song_row = tk.Frame(setup, bg=C["panel"])
-        song_row.grid(row=0, column=1, sticky="ew", padx=(px(10), 0))
+        # ---- header: song, interface, settings; then the backing track -------
+        head = ui.card(body, px)
+        head.grid(row=0, column=0, **gap)
+        head.columnconfigure(0, weight=1)
+        top = tk.Frame(head, bg=C["panel"])
+        top.grid(row=0, column=0, sticky="ew")
         self.song_var = tk.StringVar(value=self.song.name)
-        self.song_entry = ui.entry(song_row, self.song_var, 22, size=13, px=px)
+        self.song_entry = ui.entry(top, self.song_var, 22, size=13, px=px)
         self.song_entry.pack(side="left", ipady=px(2))
         self.song_entry.bind("<Return>", self.on_song_enter)
         self.song_entry.bind("<Escape>", self.on_song_escape)
-        ttk.Button(song_row, text="Open folder", takefocus=0,
+        ttk.Button(top, text="Folder", style="Small.TButton", takefocus=0,
                    command=self.open_folder).pack(side="left", padx=(px(6), 0))
+        ttk.Button(top, text="\u2699  Settings", style="Small.TButton", takefocus=0,
+                   command=self.open_settings).pack(side="right")
+        self.device_short = ui.label(top, "", size=9, cursor="hand2")
+        self.device_short.pack(side="right", padx=(0, px(12)))
+        self.device_dot = ui.label(top, "\u25cf", fg=C["grey"], cursor="hand2")
+        self.device_dot.pack(side="right", padx=(0, px(4)))
+        for w in (self.device_short, self.device_dot):
+            w.bind("<Button-1>", lambda e: self.open_settings())
 
-        self.rate_var = tk.StringVar(value=str(self.settings["samplerate"]))
-        self.rate_box = ttk.Combobox(song_row, textvariable=self.rate_var, values=SAMPLE_RATES,
-                                     width=6, state="readonly", takefocus=0)
-        self.rate_box.pack(side="right")
-        self.rate_box.bind("<<ComboboxSelected>>", self.on_rate)
-        ui.label(song_row, "Hz").pack(side="right", padx=(px(12), px(4)))
-        self.input_var = tk.StringVar(value=self.settings["input"]
-                                      if self.settings["input"] in INPUT_CHOICES else "1")
-        self.input_select = ui.Segmented(song_row, self.input_var, list(INPUT_CHOICES),
-                                         self.on_input, px=px)
-        self.input_select.pack(side="right")
-        self.input_buttons = [self.input_select]
-        ui.label(song_row, "Input").pack(side="right", padx=(px(12), px(4)))
-
-        ui.label(setup, "TRACK", size=8, weight="bold").grid(row=1, column=0, sticky="w",
-                                                             pady=(px(8), 0))
-        trk = tk.Frame(setup, bg=C["panel"])
-        trk.grid(row=1, column=1, sticky="ew", padx=(px(10), 0), pady=(px(8), 0))
-        self.track_label = ui.label(trk, "none", fg=C["fg"], anchor="w")
-        self.track_label.pack(side="left", padx=(0, px(8)))
         self.track_widgets = []
-        for text, cmd in (("Load...", self.load_track_dialog), ("Clear", self.clear_track)):
-            b = ttk.Button(trk, text=text, style="Small.TButton", takefocus=0, command=cmd)
-            b.pack(side="left", padx=(0, px(4)))
-            self.track_widgets.append(b)
-        cal = ttk.Button(trk, text="Calibrate", style="Small.TButton", takefocus=0,
-                         command=self._act(self.calibrate))
-        cal.pack(side="right")
-        self.track_widgets.append(cal)
-        self.latency_label = ui.label(trk, "", size=9)
-        self.latency_label.pack(side="right", padx=(px(8), px(6)))
-
-        cue = tk.Frame(setup, bg=C["panel"])
-        cue.grid(row=2, column=1, sticky="ew", padx=(px(10), 0), pady=(px(6), 0))
-        self.use_track_var = tk.BooleanVar(value=True)
-        cb = ttk.Checkbutton(cue, text="Play while recording", variable=self.use_track_var,
-                             style="Card.TCheckbutton", takefocus=0,
-                             command=self.on_track_fields)
-        cb.pack(side="left", padx=(0, px(16)))
-        self.track_widgets.append(cb)
+        # With a track: name, where to start, count-in. Without: one quiet line.
+        self.track_row = tk.Frame(head, bg=C["panel"])
+        self.track_row.grid(row=1, column=0, sticky="ew", pady=(px(8), 0))
+        self.track_label = ui.label(self.track_row, "", fg=C["fg"], anchor="w")
+        self.track_label.pack(side="left", padx=(0, px(14)))
         self.start_var = tk.StringVar()
         self.leadin_var = tk.StringVar()
-        for text, var, width in (("Start at", self.start_var, 6),
-                                 ("Count-in s", self.leadin_var, 4)):
-            ui.label(cue, text).pack(side="left", padx=(0, px(4)))
-            e = ui.entry(cue, var, width, px=px)
-            e.pack(side="left", ipady=px(1), padx=(0, px(16)))
+        for text, var, width, unit in (("from", self.start_var, 6, ""),
+                                       ("count-in", self.leadin_var, 3, "s")):
+            ui.label(self.track_row, text).pack(side="left", padx=(0, px(4)))
+            e = ui.entry(self.track_row, var, width, px=px)
+            e.pack(side="left", ipady=px(1), padx=(0, px(2) if unit else px(12)))
             e.bind("<Return>", self.on_track_fields)
             e.bind("<FocusOut>", self.on_track_fields)
             self.track_widgets.append(e)
+            if unit:
+                ui.label(self.track_row, unit).pack(side="left", padx=(0, px(12)))
+        self.use_track_var = tk.BooleanVar(value=True)
+        cb = ttk.Checkbutton(self.track_row, text="Play while recording",
+                             variable=self.use_track_var, style="Card.TCheckbutton",
+                             takefocus=0, command=self.on_track_fields)
+        cb.pack(side="left")
+        self.track_widgets.append(cb)
+        for text, cmd in (("Clear", self.clear_track), ("Change...", self.load_track_dialog)):
+            b = ttk.Button(self.track_row, text=text, style="Small.TButton", takefocus=0,
+                           command=cmd)
+            b.pack(side="right", padx=(px(4), 0))
+            self.track_widgets.append(b)
+        self.latency_warning = ui.label(self.track_row, "not calibrated", fg=C["yellow"],
+                                        size=9, cursor="hand2")
+        self.latency_warning.bind("<Button-1>", lambda e: self.open_settings())
+
+        self.dry_row = tk.Frame(head, bg=C["panel"])
+        self.dry_row.grid(row=1, column=0, sticky="ew", pady=(px(8), 0))
+        ui.label(self.dry_row, "No backing track  \u00b7  records dry",
+                 anchor="w").pack(side="left")
+        b = ttk.Button(self.dry_row, text="Load track...", style="Small.TButton",
+                       takefocus=0, command=self.load_track_dialog)
+        b.pack(side="right")
+        self.track_widgets.append(b)
+
+        # Only shown when the interface needs attention
+        self.device_warning = tk.Label(body, text="", bg=C["bg"], fg=C["yellow"],
+                                       font=("Segoe UI", 9), anchor="w", justify="left")
 
         # ---- input meter -----------------------------------------------------
         self.meter = ui.Meter(body, engine.METER_CHANNELS, METER_MIN_DB, px,
                               on_clip_click=self.reset_clip)
-        self.meter.grid(row=1, column=0, sticky="ew", pady=(px(6), 0))
-        ui.label(body, "Loudest notes should peak in the shaded zone (-18 to -6 dBFS). "
-                       "Set gain on the interface, not here.", size=9
-                 ).grid(row=2, column=0, sticky="w", pady=(0, px(10)))
+        self.meter.grid(row=2, column=0, sticky="ew", pady=(px(6), px(10)))
 
         # ---- status band: what is happening, and which take G/B will judge ----
         hero = tk.Frame(body, bg=C["panel"])
@@ -283,13 +269,15 @@ class App:
         self.progress.grid(row=2, column=0, sticky="ew")
         self._status_shown = None
         self._verdict_live = False
+        self._verdict_text = ""
+        self._hearing_shown = ""
 
-        # ---- transport + playback card ----------------------------------------
+        # ---- transport, verdict, and how playback should sound -----------------
         deck = ui.card(body, px)
         deck.grid(row=4, column=0, **gap)
-        deck.columnconfigure(1, weight=1)
+        deck.columnconfigure(0, weight=1)
         transport = tk.Frame(deck, bg=C["panel"])
-        transport.grid(row=0, column=0, columnspan=2, sticky="ew")
+        transport.grid(row=0, column=0, sticky="ew")
         self.buttons = {}
         for key, text, cmd in (("rec", REC_TEXT, self.toggle_record),
                                ("play", PLAY_TEXT, self.toggle_play),
@@ -305,15 +293,18 @@ class App:
             b.pack(side="right", padx=(px(6), 0))
             self.verdict_buttons.append((b, color, hover))
 
-        ui.label(deck, "Sound good  V").grid(row=1, column=0, sticky="w", pady=(px(10), 0))
         sound = tk.Frame(deck, bg=C["panel"])
-        sound.grid(row=1, column=1, sticky="ew", padx=(px(10), 0), pady=(px(10), 0))
+        sound.grid(row=1, column=0, sticky="ew", pady=(px(10), 0))
         self.polish_var = tk.StringVar(value=self.settings["polish"])
-        self.polish_select = ui.Segmented(
-            sound, self.polish_var, polish.MODES, self.on_polish_mode, px=px,
-            labels={m: m.title() for m in polish.MODES}, accent=C["gold"])
-        self.polish_select.pack(side="left")
-        self.polish_buttons = [self.polish_select]
+        pitch, tone = polish.split_mode(self.settings["polish"])
+        self.pitch_var = tk.StringVar(value=pitch)
+        self.tone_var = tk.StringVar(value=tone)
+        labels = {level: level.title() for level in polish.LEVELS}
+        for text, var, accent in (("Pitch  V", self.pitch_var, C["gold"]),
+                                  ("Tone  T", self.tone_var, C["blue"])):
+            ui.label(sound, text).pack(side="left", padx=(0, px(6)))
+            ui.Segmented(sound, var, polish.LEVELS, self.on_sound, labels=labels, px=px,
+                         accent=accent).pack(side="left", padx=(0, px(18)))
         self.key_var = tk.StringVar(value=self._song_key_name())
         self.key_box = ttk.Combobox(sound, textvariable=self.key_var,
                                     values=tuple(polish.KEY_NAMES), width=12,
@@ -322,33 +313,16 @@ class App:
         self.key_box.bind("<<ComboboxSelected>>", self.on_key)
         ui.label(sound, "Key").pack(side="right", padx=(px(10), px(4)))
 
-        # Where playback goes. Recording over a track always uses the headphones.
-        ui.label(deck, "Play on  O").grid(row=2, column=0, sticky="w", pady=(px(6), 0))
-        route = tk.Frame(deck, bg=C["panel"])
-        route.grid(row=2, column=1, sticky="ew", padx=(px(10), 0), pady=(px(6), 0))
-        self.route_var = tk.StringVar(value=self.settings["playback"])
-        self.route_select = ui.Segmented(route, self.route_var, engine.ROUTES, self.on_route,
-                                         labels={r: r.title() for r in engine.ROUTES}, px=px)
-        self.route_select.pack(side="left")
-        self.speakers_var = tk.StringVar()
-        self.speakers_box = ttk.Combobox(route, textvariable=self.speakers_var, width=26,
-                                         state="readonly", takefocus=0,
-                                         postcommand=self._refresh_speakers)
-        self.speakers_box.pack(side="right")
-        self.speakers_box.bind("<<ComboboxSelected>>", self.on_speakers)
-        ui.label(route, "Speakers").pack(side="right", padx=(px(10), px(4)))
-        self._refresh_speakers()
-
         # ---- takes list ---------------------------------------------------------
         body.rowconfigure(5, weight=1)
         listing = tk.Frame(body, bg=C["panel"], padx=px(4), pady=px(4))
         listing.grid(row=5, column=0, sticky="nsew")
-        head = tk.Frame(listing, bg=C["panel"])
-        head.pack(side="top", fill="x", padx=px(8), pady=(px(2), 0))
-        self.takes_title = ui.label(head, "TAKES", size=8, weight="bold")
+        lhead = tk.Frame(listing, bg=C["panel"])
+        lhead.pack(side="top", fill="x", padx=px(8), pady=(px(2), 0))
+        self.takes_title = ui.label(lhead, "TAKES", size=8, weight="bold")
         self.takes_title.pack(side="left")
         self.show_trash = tk.BooleanVar(value=False)
-        ttk.Checkbutton(head, text="Show trash", variable=self.show_trash, takefocus=0,
+        ttk.Checkbutton(lhead, text="Show trash", variable=self.show_trash, takefocus=0,
                         style="Card.TCheckbutton",
                         command=self.on_show_trash).pack(side="right")
         cols = ("take", "length", "peak", "notes")
@@ -372,6 +346,99 @@ class App:
         self.tree.bind("<Double-1>", lambda e: self._act(self.toggle_play)())
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._update_verdict())
 
+        self._build_settings()
+
+    def _build_settings(self):
+        """Set-once controls, in their own window so the main one stays calm."""
+        px = self.px
+        win = self.settings_win = tk.Toplevel(self.root, bg=C["bg"], padx=px(18),
+                                              pady=px(14))
+        win.title("Take Recorder settings")
+        win.withdraw()
+        win.transient(self.root)
+        win.protocol("WM_DELETE_WINDOW", self.close_settings)
+        win.bind("<Escape>", lambda e: self.close_settings())
+        win.columnconfigure(1, weight=1)
+
+        def section(row, title):
+            ui.label(win, title, size=8, weight="bold").grid(
+                row=row, column=0, columnspan=2, sticky="w", pady=(px(14) if row else 0, px(4)))
+
+        def field(row, text):
+            ui.label(win, text).grid(row=row, column=0, sticky="w", padx=(0, px(14)),
+                                     pady=px(3))
+            cell = tk.Frame(win, bg=C["bg"])
+            cell.grid(row=row, column=1, sticky="w", pady=px(3))
+            return cell
+
+        section(0, "RECORDING")
+        cell = field(1, "Record input")
+        self.input_var = tk.StringVar(value=self.settings["input"]
+                                      if self.settings["input"] in INPUT_CHOICES else "1")
+        self.input_select = ui.Segmented(cell, self.input_var, list(INPUT_CHOICES),
+                                         self.on_input, px=px)
+        self.input_select.pack(side="left")
+        self.input_buttons = [self.input_select]
+        cell = field(2, "Sample rate")
+        self.rate_var = tk.StringVar(value=str(self.settings["samplerate"]))
+        self.rate_box = ttk.Combobox(cell, textvariable=self.rate_var, values=SAMPLE_RATES,
+                                     width=7, state="readonly", takefocus=0)
+        self.rate_box.pack(side="left")
+        self.rate_box.bind("<<ComboboxSelected>>", self.on_rate)
+        ui.label(cell, "Hz   (leave on auto)", size=9).pack(side="left", padx=(px(6), 0))
+        ui.label(win, "Loudest notes should peak in the shaded zone of the meter "
+                      "(-18 to -6 dBFS). Set gain on the interface.", size=9,
+                 wraplength=px(460), justify="left").grid(row=3, column=0, columnspan=2,
+                                                          sticky="w", pady=(px(2), 0))
+
+        section(4, "PLAYBACK")
+        cell = field(5, "Play on  (O)")
+        self.route_var = tk.StringVar(value=self.settings["playback"])
+        ui.Segmented(cell, self.route_var, engine.ROUTES, self.on_route,
+                     labels={r: r.title() for r in engine.ROUTES}, px=px).pack(side="left")
+        cell = field(6, "Speakers")
+        self.speakers_var = tk.StringVar()
+        self.speakers_box = ttk.Combobox(cell, textvariable=self.speakers_var, width=34,
+                                         state="readonly", takefocus=0,
+                                         postcommand=self._refresh_speakers)
+        self.speakers_box.pack(side="left")
+        self.speakers_box.bind("<<ComboboxSelected>>", self.on_speakers)
+        self._refresh_speakers()
+
+        section(7, "BACKING TRACK LATENCY")
+        cell = field(8, "Latency")
+        self.latency_label = ui.label(cell, "", fg=C["fg"])
+        self.latency_label.pack(side="left")
+        cal = ttk.Button(cell, text="Calibrate...", style="Small.TButton", takefocus=0,
+                         command=self._act(self.calibrate))
+        cal.pack(side="left", padx=(px(10), 0))
+        self.track_widgets.append(cal)
+
+        section(9, "INTERFACE")
+        self.device_label = ui.label(win, "", size=9, anchor="w", justify="left",
+                                     wraplength=px(460))
+        self.device_label.grid(row=10, column=0, columnspan=2, sticky="w")
+        buttons = tk.Frame(win, bg=C["bg"])
+        buttons.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(px(8), 0))
+        ttk.Button(buttons, text="Reconnect", style="Small.TButton", takefocus=0,
+                   command=self._act(lambda: self.connect(refresh=True))).pack(side="left")
+        ttk.Button(buttons, text="Close", takefocus=0,
+                   command=self.close_settings).pack(side="right")
+
+    def open_settings(self):
+        win = self.settings_win
+        if win.state() == "withdrawn":
+            win.update_idletasks()
+            x = self.root.winfo_rootx() + self.px(60)
+            y = self.root.winfo_rooty() + self.px(60)
+            win.geometry(f"+{x}+{y}")
+        win.deiconify()
+        win.lift()
+        win.focus_set()
+
+    def close_settings(self):
+        self.settings_win.withdraw()
+        self.root.focus_set()
 
     def px(self, n):
         """A layout size in 96-dpi pixels, scaled for this screen."""
@@ -389,8 +456,10 @@ class App:
         for seq, fn in (("<space>", self.toggle_record),
                         ("<Control-z>", self.undo_trash), ("<Control-Z>", self.undo_trash),
                         ("<KeyPress-p>", self.toggle_play), ("<KeyPress-P>", self.toggle_play),
-                        ("<KeyPress-v>", self.cycle_polish),
-                        ("<KeyPress-V>", self.cycle_polish),
+                        ("<KeyPress-v>", self.cycle_pitch),
+                        ("<KeyPress-V>", self.cycle_pitch),
+                        ("<KeyPress-t>", self.cycle_tone),
+                        ("<KeyPress-T>", self.cycle_tone),
                         ("<KeyPress-o>", self.cycle_route),
                         ("<KeyPress-O>", self.cycle_route),
                         ("<KeyPress-g>", self.mark_good), ("<KeyPress-G>", self.mark_good),
@@ -556,25 +625,34 @@ class App:
 
     def _update_device_label(self):
         b = self.engine.backend
-        if self.engine.input_paused:
-            self.device_dot.config(fg=C["yellow"])
-            self.device_label.config(
-                text="Input paused during playback: the 26c can't run input and output at "
-                     "different rates.\nSet Hz to auto to avoid this.", fg=C["yellow"])
-            return
+        warning = None
         if b is None:
-            self.device_dot.config(fg=C["red"])
-            self.device_label.config(text=self.engine.error or "No interface", fg=C["red"])
-            return
-        quality = ("bit-perfect" if b.bit_perfect
-                   else "NOT bit-perfect -- Windows is processing the signal")
-        auto = " (auto)" if self.engine.requested_rate == "auto" else ""
-        self.device_dot.config(fg=C["green"] if b.bit_perfect else C["yellow"])
-        self.device_label.config(
-            text=f"{b.describe()}   \u00b7   {self.engine.samplerate} Hz{auto} / 24-bit WAV   "
-                 f"\u00b7   {quality}\n"
-                 f"Headphones: {self.engine.output_name()}   \u00b7   Takes: {self.song.dir}",
-            fg=C["dim"] if b.bit_perfect else C["yellow"])
+            color, short = C["red"], "No interface"
+            warning = self.engine.error or "No interface"
+            details = warning
+        else:
+            quality = ("bit-perfect" if b.bit_perfect
+                       else "NOT bit-perfect -- Windows is processing the signal")
+            auto = " (auto)" if self.engine.requested_rate == "auto" else ""
+            color = C["green"] if b.bit_perfect else C["yellow"]
+            short = f"{b.name}  \u00b7  {self.engine.samplerate / 1000:g} kHz"
+            details = (f"{b.describe()}\n{self.engine.samplerate} Hz{auto} / 24-bit WAV  "
+                       f"\u00b7  {quality}\nHeadphones: {self.engine.output_name()}\n"
+                       f"Takes: {self.song.dir}")
+            if not b.bit_perfect:
+                warning = "Not bit-perfect: Windows is processing the signal (see Settings)"
+        if self.engine.input_paused:
+            color = C["yellow"]
+            warning = ("Input paused during playback: the interface can't run input and "
+                       "output at different rates. Set Hz to auto in Settings.")
+        self.device_dot.config(fg=color)
+        self.device_short.config(text=short, fg=C["red"] if b is None else C["dim"])
+        self.device_label.config(text=details, fg=C["dim"] if b is not None else C["red"])
+        if warning:
+            self.device_warning.config(text=warning, fg=C["red"] if b is None else C["yellow"])
+            self.device_warning.grid(row=1, column=0, sticky="ew", pady=(0, self.px(4)))
+        else:
+            self.device_warning.grid_remove()
 
     # ---- song / settings --------------------------------------------------
 
@@ -605,20 +683,27 @@ class App:
 
     def _show_track_fields(self):
         cfg = self.song.config
+        latency = self.settings.get("latency_ms")
         if self.track_data is not None:
             name = cfg["track"].removeprefix("backing - ")
             length = len(self.track_data[0]) / self.track_data[1]
-            self.track_label.config(text=f"{name}  ({fmt_clock(length)})", fg=C["fg"])
+            self.track_label.config(text=f"\u266a  {name}  ({fmt_clock(length)})")
+            self.dry_row.grid_remove()
+            self.track_row.grid()
+            if latency is None:
+                self.latency_warning.pack(side="right", padx=(0, self.px(8)))
+            else:
+                self.latency_warning.pack_forget()
         else:
-            self.track_label.config(text="none (records dry)", fg=C["dim"])
+            self.track_row.grid_remove()
+            self.dry_row.grid()
         self.use_track_var.set(bool(cfg.get("use_track", True)))
         self.start_var.set(fmt_clock(cfg.get("start_at", 0.0)))
         self.leadin_var.set(f"{cfg.get('leadin', 2.0):g}")
-        latency = self.settings.get("latency_ms")
         if latency is None:
-            self.latency_label.config(text="Latency: not calibrated", fg=C["yellow"])
+            self.latency_label.config(text="not calibrated", fg=C["yellow"])
         else:
-            self.latency_label.config(text=f"Latency: {latency:.1f} ms", fg=C["dim"])
+            self.latency_label.config(text=f"{latency:.1f} ms", fg=C["fg"])
         self.key_var.set(self._song_key_name())
 
     def on_track_fields(self, event=None):
@@ -727,6 +812,11 @@ class App:
         except (TypeError, ValueError):
             mode = "off"
         self.polish_var.set(mode)
+        pitch, tone = polish.split_mode(mode)
+        if self.pitch_var.get() != pitch:
+            self.pitch_var.set(pitch)
+        if self.tone_var.get() != tone:
+            self.tone_var.set(tone)
         active = self._active_audition()
         changed = self.settings.get("polish") != mode
         self.settings["polish"] = mode
@@ -737,7 +827,11 @@ class App:
             if take is not None:
                 self._request_play(take, mode)
         elif changed:
-            self.flash(f"Sound good: {mode.title()}")
+            self.flash(f"Pitch {pitch}  \u00b7  tone {tone}")
+
+    def on_sound(self):
+        self.polish_var.set(polish.join_mode(self.pitch_var.get(), self.tone_var.get()))
+        self.on_polish_mode()
 
     def _refresh_speakers(self):
         try:
@@ -784,14 +878,17 @@ class App:
         self._request_play(take, active[1])
         return True
 
-    def cycle_polish(self):
-        try:
-            current = polish.normalize_mode(self.polish_var.get())
-        except (TypeError, ValueError):
-            current = "off"
-        modes = tuple(polish.MODES)
-        self.polish_var.set(modes[(modes.index(current) + 1) % len(modes)])
-        self.on_polish_mode()
+    def _cycle_level(self, var):
+        levels = polish.LEVELS
+        current = var.get() if var.get() in levels else levels[0]
+        var.set(levels[(levels.index(current) + 1) % len(levels)])
+        self.on_sound()
+
+    def cycle_pitch(self):
+        self._cycle_level(self.pitch_var)
+
+    def cycle_tone(self):
+        self._cycle_level(self.tone_var)
 
     def on_key(self, event=None):
         name = self.key_var.get()
@@ -954,7 +1051,7 @@ class App:
         else:
             text, fg, state = "No take to judge yet", C["dim"], "disabled"
         self._verdict_live = fg != C["dim"]
-        self.verdict_label.config(text=text)
+        self._verdict_text = text
         self._paint_verdict()
         for b, color, hover in self.verdict_buttons:
             b.config(state=state)
@@ -1305,13 +1402,11 @@ class App:
                     f"{fmt_time(self.engine.take_seconds())}", "rec", None)
         if self._polishing is not None:
             job = self._polishing
-            return (f"POLISHING {job['mode'].upper()}  \u00b7  take {job['take'].num:03d}...",
-                    "busy", None)
+            return f"POLISHING  take {job['take'].num:03d}...", "busy", None
         if self._estimating_key is not None:
             return "ANALYZING TRACK KEY...", "busy", None
         if self.playing_num is not None and player is not None:
-            mode = "" if self.playing_mode == "off" else f" {self.playing_mode.upper()}"
-            return (f"\u25b6 PLAY{mode}  take {self.playing_num:03d}   "
+            return (f"\u25ba PLAY  take {self.playing_num:03d}   "
                     f"{fmt_time(player.seconds)} / {fmt_time(player.length)}", "play",
                     player.seconds / player.length if player.length else None)
         if flash and flash[1] > 0:
@@ -1322,8 +1417,10 @@ class App:
 
     def _show_status(self, text, tone, progress):
         bg, fg = self.STATUS_TONES[tone]
-        if self._status_shown != (text, tone):
+        hearing = self._hearing()
+        if self._status_shown != (text, tone) or self._hearing_shown != hearing:
             self._status_shown = (text, tone)
+            self._hearing_shown = hearing
             self.status.config(text=text, bg=bg, fg=fg)
             self.status.master.config(bg=bg)
             self._paint_verdict()
@@ -1335,7 +1432,20 @@ class App:
         bg, fg = self.STATUS_TONES[tone]
         if tone in ("idle", "flash", "error"):
             fg = C["fg"] if self._verdict_live else C["dim"]
-        self.verdict_label.config(bg=bg, fg=fg)
+        text = self._verdict_text
+        hearing = self._hearing()
+        if hearing:
+            text = f"{text}   \u00b7   {hearing}" if text else hearing
+        self.verdict_label.config(text=text, bg=bg, fg=fg)
+
+    def _hearing(self):
+        """Which version is playing or being prepared, in words."""
+        job = self._polishing
+        if job is not None:
+            return polish.describe_mode(job["mode"])
+        if self.playing_num is not None and self.playing_mode is not None:
+            return f"hearing {polish.describe_mode(self.playing_mode)}"
+        return ""
 
     def _update_play_button(self):
         playing = self._active_audition() is not None

@@ -15,11 +15,16 @@ import numpy as np
 import soundfile as sf
 
 TAKE_RE = re.compile(r"^take_(\d{3,})\.wav$")
-POLISHED_RE = re.compile(r"^take_(\d{3,})\.(gentle|strong)\.wav$")
+_MODE_RE = r"(?:none|some|lots)-(?:none|some|lots)"
+POLISHED_RE = re.compile(r"^take_(\d{3,})\." + _MODE_RE + r"\.wav$")
 POLISHED_TMP_RE = re.compile(
-    r"^\.?take_(\d{3,})\.(gentle|strong)\.[A-Za-z0-9_-]+\.tmp\.wav$")
+    r"^\.?take_(\d{3,})\." + _MODE_RE + r"\.[A-Za-z0-9_-]+\.tmp\.wav$")
+# Renders from before pitch and tone were separate; always stale now.
+LEGACY_POLISHED_RE = re.compile(
+    r"^\.?take_(\d{3,})\.(gentle|strong)(\.[A-Za-z0-9_-]+\.tmp)?\.wav$")
 POLISH_INDEX_TMP_RE = re.compile(r"^\.index\.[A-Za-z0-9_-]+\.tmp$")
-POLISH_MODES = ("gentle", "strong")
+POLISH_MODES = tuple(f"{p}-{t}" for p in ("none", "some", "lots")
+                    for t in ("none", "some", "lots") if (p, t) != ("none", "none"))
 POLISH_INDEX_VERSION = 2
 HASH_CHUNK_SIZE = 1024 * 1024
 UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9 _.'()-]+")
@@ -240,7 +245,8 @@ class Song:
     @staticmethod
     def _validate_polish_mode(mode):
         if mode not in POLISH_MODES:
-            raise ValueError(f"Invalid polish mode {mode!r}; use gentle or strong")
+            raise ValueError(f"Invalid polish mode {mode!r}; use <pitch>-<tone>, "
+                             "e.g. some-lots")
 
     @staticmethod
     def _validate_recipe_hash(recipe_hash):
@@ -472,7 +478,8 @@ class Song:
             for path in children:
                 if not path.is_file() or path == self.polish_index_path:
                     continue
-                if POLISHED_TMP_RE.match(path.name) or POLISH_INDEX_TMP_RE.match(path.name):
+                if (POLISHED_TMP_RE.match(path.name) or POLISH_INDEX_TMP_RE.match(path.name)
+                        or LEGACY_POLISHED_RE.match(path.name)):
                     try:
                         path.unlink()
                     except OSError:

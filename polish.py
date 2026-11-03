@@ -13,13 +13,17 @@ from dataclasses import dataclass
 import numpy as np
 
 
-MODES = ("off", "gentle", "strong")
+LEVELS = ("none", "some", "lots")
+# A mode is "off" (the raw take) or "<pitch>-<tone>", e.g. "lots-none".
+MODES = ("off",) + tuple(f"{pitch}-{tone}" for pitch in LEVELS for tone in LEVELS
+                         if (pitch, tone) != ("none", "none"))
+_LEGACY_MODES = {"gentle": "some-some", "strong": "lots-lots", "none-none": "off"}
 NOTE_NAMES = ("C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
 KEY_NAMES = ("Chromatic",) + tuple(
     f"{name} {scale}" for name in NOTE_NAMES for scale in ("major", "minor")
 )
 
-CHAIN_VERSION = 2
+CHAIN_VERSION = 3
 MIN_F0 = 65.0
 MAX_F0 = 1000.0
 FRAME_SECONDS = 0.050
@@ -48,25 +52,18 @@ _ROOT_ALIASES = {
     "b": 11, "cb": 11,
 }
 
-_RECIPES = {
-    "gentle": {
-        "pitch_pull": 0.50,
-        "error_smooth_frames": 11,
-        "highpass_hz": 85.0,
-        "presence_db": 1.5,
-        "compress_threshold_db": -17.0,
-        "compress_ratio": 2.2,
-        "reverb_mix": 0.0,
-    },
-    "strong": {
-        "pitch_pull": 1.0,
-        "error_smooth_frames": 1,
-        "highpass_hz": 95.0,
-        "presence_db": 2.5,
-        "compress_threshold_db": -20.0,
-        "compress_ratio": 3.5,
-        "reverb_mix": 0.055,
-    },
+# Pitch: how far each note is pulled to the nearest allowed note, and how many
+# 10 ms frames the correction is smoothed over (more = slower, more natural).
+_PITCH = {
+    "some": {"pitch_pull": 0.50, "error_smooth_frames": 11},
+    "lots": {"pitch_pull": 1.0, "error_smooth_frames": 1},
+}
+# Tone: rumble cut, presence lift around 4.2 kHz, compression and a touch of room.
+_TONE = {
+    "some": {"highpass_hz": 85.0, "presence_db": 1.5, "compress_threshold_db": -17.0,
+             "compress_ratio": 2.2, "reverb_mix": 0.0},
+    "lots": {"highpass_hz": 95.0, "presence_db": 2.5, "compress_threshold_db": -20.0,
+             "compress_ratio": 3.5, "reverb_mix": 0.055},
 }
 
 
@@ -98,11 +95,39 @@ class KeySpec:
 
 
 def normalize_mode(value):
-    """Return a canonical playback mode or raise ValueError."""
+    """Return a canonical playback mode or raise ValueError.
+
+    The old single-knob names still work: gentle is some-some, strong is lots-lots.
+    """
     mode = "off" if value is None else str(value).strip().lower()
+    mode = _LEGACY_MODES.get(mode, mode)
     if mode not in MODES:
         raise ValueError(f"unknown polish mode: {value!r}")
     return mode
+
+
+def split_mode(mode):
+    """(pitch level, tone level) for a mode."""
+    mode = normalize_mode(mode)
+    if mode == "off":
+        return "none", "none"
+    pitch, tone = mode.split("-")
+    return pitch, tone
+
+
+def join_mode(pitch, tone):
+    """The mode for a pitch level and a tone level."""
+    if pitch not in LEVELS or tone not in LEVELS:
+        raise ValueError(f"unknown levels: pitch {pitch!r}, tone {tone!r}")
+    return "off" if (pitch, tone) == ("none", "none") else f"{pitch}-{tone}"
+
+
+def describe_mode(mode):
+    """Words for a mode, for the status line."""
+    pitch, tone = split_mode(mode)
+    if (pitch, tone) == ("none", "none"):
+        return "raw"
+    return f"pitch {pitch}, tone {tone}"
 
 
 def parse_key(value):
@@ -141,11 +166,13 @@ def recipe_hash(mode, key=None):
     """Return a stable cache key for every setting that changes a render."""
     mode = normalize_mode(mode)
     spec = parse_key(key)
+    pitch, tone = split_mode(mode)
     payload = {
         "chain": CHAIN_VERSION,
         "key": spec.name if spec is not None else "Chromatic",
         "mode": mode,
-        "recipe": _RECIPES.get(mode, {}),
+        "pitch": _PITCH.get(pitch, {}),
+        "tone": _TONE.get(tone, {}),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
     return hashlib.sha256(encoded).hexdigest()[:20]
@@ -264,14 +291,14 @@ def _fill_track(values):
     return np.interp(indexes, good, values[good])
 
 
-def _pitch_curves(centers, pitches, mode, key, length, rate):
+def _pitch_curves(centers, pitches, level, key, length, rate):
     filled = _fill_track(pitches)
     if filled is None:
         return None
     midi = 69.0 + 12.0 * np.log2(filled / 440.0)
     target = snap_midi(midi, key)
     error = target - midi
-    params = _RECIPES[mode]
+    params = _PITCH[level]
     if params["error_smooth_frames"] > 1:
         error = _moving_average(error, params["error_smooth_frames"])
     corrected_midi = midi + params["pitch_pull"] * error
@@ -395,12 +422,12 @@ def _td_psola(data, analysis, original_f0, corrected_f0, rate, cancel=None):
     return output
 
 
-def _pitch_correct(data, rate, mode, key, cancel=None):
+def _pitch_correct(data, rate, level, key, cancel=None):
     analysis = _analysis_channel(data)
     centers, pitches, _ = _track_pitch(analysis, rate, cancel)
     if np.count_nonzero(np.isfinite(pitches)) < 2:
         return data.copy()
-    curves = _pitch_curves(centers, pitches, mode, key, len(data), rate)
+    curves = _pitch_curves(centers, pitches, level, key, len(data), rate)
     if curves is None:
         return data.copy()
     original, corrected, voiced = curves
@@ -409,8 +436,8 @@ def _pitch_correct(data, rate, mode, key, cancel=None):
     return data * (1.0 - voiced[:, None]) + shifted * voiced[:, None]
 
 
-def _spectral_polish(data, rate, mode, cancel=None):
-    params = _RECIPES[mode]
+def _spectral_polish(data, rate, level, cancel=None):
+    params = _TONE[level]
     if len(data) < 8:
         return data.copy()
 
@@ -448,8 +475,8 @@ def _spectral_polish(data, rate, mode, cancel=None):
     return output[edge:edge + len(data)]
 
 
-def _compress(data, rate, mode):
-    params = _RECIPES[mode]
+def _compress(data, rate, level):
+    params = _TONE[level]
     detector = np.max(np.abs(data), axis=1)
     window = max(3, int(round(0.012 * rate)))
     if window % 2 == 0:
@@ -479,14 +506,18 @@ def _add_reverb(data, rate, mix):
 def _process_active(data, rate, mode, key, cancel=None):
     raw = np.asarray(data, dtype=np.float64)
     _check_cancel(cancel)
-    processed = _pitch_correct(raw, rate, mode, key, cancel)
-    _check_cancel(cancel)
-    processed = _spectral_polish(processed, rate, mode, cancel)
-    _check_cancel(cancel)
-    processed = _compress(processed, rate, mode)
-    _check_cancel(cancel)
-    processed = _add_reverb(processed, rate, _RECIPES[mode]["reverb_mix"])
-    _check_cancel(cancel)
+    pitch, tone = split_mode(mode)
+    processed = raw
+    if pitch != "none":
+        processed = _pitch_correct(processed, rate, pitch, key, cancel)
+        _check_cancel(cancel)
+    if tone != "none":
+        processed = _spectral_polish(processed, rate, tone, cancel)
+        _check_cancel(cancel)
+        processed = _compress(processed, rate, tone)
+        _check_cancel(cancel)
+        processed = _add_reverb(processed, rate, _TONE[tone]["reverb_mix"])
+        _check_cancel(cancel)
 
     raw_rms = float(np.sqrt(np.mean(raw * raw)))
     made_rms = float(np.sqrt(np.mean(processed * processed)))

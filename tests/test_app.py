@@ -41,7 +41,7 @@ class PlaybackStateTest(unittest.TestCase):
         instance.song = mock.Mock()
         take = SimpleNamespace(num=1)
 
-        instance._start_playback(take, "unused.wav", "strong", 7, instance.song)
+        instance._start_playback(take, "unused.wav", "lots-lots", 7, instance.song)
 
         instance.engine.play.assert_not_called()
         instance.song.get.assert_not_called()
@@ -93,7 +93,7 @@ class PlaybackStateTest(unittest.TestCase):
         instance.song = mock.Mock()
         take = SimpleNamespace(label="009", trashed=True)
 
-        instance._request_play(take, "gentle")
+        instance._request_play(take, "some-some")
 
         instance.stop_playback.assert_called_once_with()
         instance.flash.assert_called_once_with("Restore take 009 before polishing it")
@@ -122,9 +122,9 @@ class PlaybackStateTest(unittest.TestCase):
                 "request_id": 2,
                 "song": song,
                 "take": take,
-                "mode": "strong",
+                "mode": "lots-lots",
                 "key": None,
-                "recipe": polish.recipe_hash("strong", None),
+                "recipe": polish.recipe_hash("lots-lots", None),
                 "cancel": threading.Event(),
             }
             instance._pending_play = job
@@ -138,7 +138,7 @@ class PlaybackStateTest(unittest.TestCase):
             self.assertIsNone(error)
             self.assertTrue(path.is_file())
             self.assertEqual(raw_path.read_bytes(), raw_before)
-            self.assertEqual(song.cached_polished(take, "strong", job["recipe"]), path)
+            self.assertEqual(song.cached_polished(take, "lots-lots", job["recipe"]), path)
 
     def test_worker_does_not_read_raw_after_cache_check_is_cancelled(self):
         instance = recorder_app.App.__new__(recorder_app.App)
@@ -154,7 +154,7 @@ class PlaybackStateTest(unittest.TestCase):
             "request_id": 8,
             "song": song,
             "take": take,
-            "mode": "gentle",
+            "mode": "some-some",
             "key": None,
             "recipe": "recipe",
             "cancel": threading.Event(),

@@ -91,11 +91,11 @@ class PolishedCacheTest(unittest.TestCase):
 
     def test_paths_are_strict_and_do_not_become_takes(self):
         take, data = self.add_audio_take()
-        path = self.song.publish_polished(take, "gentle", "recipe-a", data, self.RATE)
-        self.assertEqual(path, self.song.dir / "polished" / "take_001.gentle.wav")
+        path = self.song.publish_polished(take, "some-some", "recipe-a", data, self.RATE)
+        self.assertEqual(path, self.song.dir / "polished" / "take_001.some-some.wav")
         self.assertEqual([item.num for item in self.song.takes()], [1])
         self.assertEqual(self.song.next_path()[0], 2)
-        for mode in ("off", "Gentle", "../gentle", ""):
+        for mode in ("off", "Gentle", "../some-some", ""):
             with self.subTest(mode=mode), self.assertRaises(ValueError):
                 self.song.polished_path(1, mode)
 
@@ -103,7 +103,7 @@ class PolishedCacheTest(unittest.TestCase):
         take, data = self.add_audio_take(channels=2)
         raw_before = take.path.read_bytes()
         expected = self.song.polish_source_stamp(take)
-        polished = self.song.publish_polished(take, "strong", "recipe-a",
+        polished = self.song.publish_polished(take, "lots-lots", "recipe-a",
                                                data * 0.5, self.RATE,
                                                expected_source=expected)
 
@@ -114,17 +114,17 @@ class PolishedCacheTest(unittest.TestCase):
         self.assertEqual(info.samplerate, self.RATE)
         self.assertEqual(info.channels, 2)
         self.assertEqual(info.subtype, "PCM_24")
-        self.assertEqual(self.song.cached_polished(take, "strong", "recipe-a"), polished)
-        self.assertIsNone(self.song.cached_polished(take, "strong", "recipe-b"))
-        self.assertIsNone(self.song.cached_polished(take, "gentle", "recipe-a"))
+        self.assertEqual(self.song.cached_polished(take, "lots-lots", "recipe-a"), polished)
+        self.assertIsNone(self.song.cached_polished(take, "lots-lots", "recipe-b"))
+        self.assertIsNone(self.song.cached_polished(take, "some-some", "recipe-a"))
         self.assertEqual(list(self.song.polished_dir.glob("*.tmp.wav")), [])
 
     def test_source_change_invalidates_cache(self):
         take, data = self.add_audio_take()
-        self.song.publish_polished(take, "gentle", "recipe-a", data, self.RATE)
+        self.song.publish_polished(take, "some-some", "recipe-a", data, self.RATE)
         with take.path.open("ab") as stream:
             stream.write(b"x")
-        self.assertIsNone(self.song.cached_polished(take, "gentle", "recipe-a"))
+        self.assertIsNone(self.song.cached_polished(take, "some-some", "recipe-a"))
 
     def test_song_instances_serialize_cache_transactions(self):
         take, data = self.add_audio_take()
@@ -133,15 +133,15 @@ class PolishedCacheTest(unittest.TestCase):
         self.assertIs(self.song._polish_lock, other._polish_lock)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            gentle = pool.submit(self.song.publish_polished, take, "gentle",
+            gentle = pool.submit(self.song.publish_polished, take, "some-some",
                                   "recipe-g", data, self.RATE)
-            strong = pool.submit(other.publish_polished, other_take, "strong",
+            strong = pool.submit(other.publish_polished, other_take, "lots-lots",
                                  "recipe-s", data * 0.5, self.RATE)
             gentle_path = gentle.result()
             strong_path = strong.result()
 
-        self.assertEqual(self.song.cached_polished(take, "gentle", "recipe-g"), gentle_path)
-        self.assertEqual(other.cached_polished(other_take, "strong", "recipe-s"), strong_path)
+        self.assertEqual(self.song.cached_polished(take, "some-some", "recipe-g"), gentle_path)
+        self.assertEqual(other.cached_polished(other_take, "lots-lots", "recipe-s"), strong_path)
 
     def test_expected_source_rejects_change_before_publish(self):
         take, data = self.add_audio_take()
@@ -150,9 +150,9 @@ class PolishedCacheTest(unittest.TestCase):
             stream.write(b"x")
 
         with self.assertRaisesRegex(RuntimeError, "Source take changed"):
-            self.song.publish_polished(take, "gentle", "recipe-a", data, self.RATE,
+            self.song.publish_polished(take, "some-some", "recipe-a", data, self.RATE,
                                        expected_source=expected)
-        self.assertFalse(self.song.polished_path(take.num, "gentle").exists())
+        self.assertFalse(self.song.polished_path(take.num, "some-some").exists())
         self.assertTrue(self.song.trash(take.num))
         with self.assertRaises(ValueError):
             self.song.polish_source_stamp(self.song.get(take.num))
@@ -166,8 +166,8 @@ class PolishedCacheTest(unittest.TestCase):
         )
         for rendered, rate in cases:
             with self.subTest(shape=rendered.shape, rate=rate), self.assertRaises(ValueError):
-                self.song.publish_polished(take, "gentle", "recipe-a", rendered, rate)
-        self.assertFalse(self.song.polished_path(take.num, "gentle").exists())
+                self.song.publish_polished(take, "some-some", "recipe-a", rendered, rate)
+        self.assertFalse(self.song.polished_path(take.num, "some-some").exists())
 
     def test_publish_discards_render_if_source_changes(self):
         take, data = self.add_audio_take()
@@ -181,65 +181,67 @@ class PolishedCacheTest(unittest.TestCase):
 
         with mock.patch("takes.sf.write", side_effect=write_and_change_source):
             with self.assertRaisesRegex(RuntimeError, "Source take changed"):
-                self.song.publish_polished(take, "strong", "recipe-a", data, self.RATE,
+                self.song.publish_polished(take, "lots-lots", "recipe-a", data, self.RATE,
                                            expected_source=expected)
-        self.assertFalse(self.song.polished_path(take.num, "strong").exists())
+        self.assertFalse(self.song.polished_path(take.num, "lots-lots").exists())
         self.assertEqual(list(self.song.polished_dir.glob("*.tmp.wav")), [])
 
     def test_failed_index_save_cannot_validate_replaced_render(self):
         take, data = self.add_audio_take()
-        path = self.song.publish_polished(take, "gentle", "recipe-a",
+        path = self.song.publish_polished(take, "some-some", "recipe-a",
                                            np.zeros_like(data), self.RATE)
         old_bytes = path.read_bytes()
 
         with mock.patch.object(self.song, "_save_polish_index",
                                side_effect=OSError("index failed")):
             with self.assertRaisesRegex(OSError, "index failed"):
-                self.song.publish_polished(take, "gentle", "recipe-b",
+                self.song.publish_polished(take, "some-some", "recipe-b",
                                            np.full_like(data, 0.125), self.RATE)
 
         self.assertNotEqual(path.read_bytes(), old_bytes)
-        self.assertIsNone(self.song.cached_polished(take, "gentle", "recipe-a"))
-        self.assertIsNone(self.song.cached_polished(take, "gentle", "recipe-b"))
+        self.assertIsNone(self.song.cached_polished(take, "some-some", "recipe-a"))
+        self.assertIsNone(self.song.cached_polished(take, "some-some", "recipe-b"))
         self.assertEqual(self.song.prune_polished(), [path])
 
     def test_prune_removes_orphans_and_temps_but_preserves_unknown_files(self):
         first, first_data = self.add_audio_take()
         second, second_data = self.add_audio_take()
-        first_render = self.song.publish_polished(first, "gentle", "recipe-a",
+        first_render = self.song.publish_polished(first, "some-some", "recipe-a",
                                                    first_data, self.RATE)
-        second_render = self.song.publish_polished(second, "strong", "recipe-b",
+        second_render = self.song.publish_polished(second, "lots-lots", "recipe-b",
                                                     second_data, self.RATE)
         self.assertTrue(self.song.trash(first.num))
-        orphan = self.song.polished_dir / "take_999.gentle.wav"
+        orphan = self.song.polished_dir / "take_999.some-some.wav"
         orphan.write_bytes(b"cache")
-        abandoned = self.song.polished_dir / ".take_999.strong.deadbeef.tmp.wav"
+        abandoned = self.song.polished_dir / ".take_999.lots-lots.deadbeef.tmp.wav"
         abandoned.write_bytes(b"partial")
         abandoned_index = self.song.polished_dir / ".index.deadbeef.tmp"
         abandoned_index.write_bytes(b"partial")
         unknown = self.song.polished_dir / "keep-me.txt"
         unknown.write_text("not a cache file", encoding="ascii")
+        legacy = self.song.polished_dir / "take_002.strong.wav"  # pre pitch/tone split
+        legacy.write_bytes(b"old render")
 
         removed = self.song.prune_polished()
 
-        expected = [abandoned, abandoned_index, first_render, orphan]
+        expected = [abandoned, abandoned_index, first_render, orphan, legacy]
         self.assertEqual(removed, sorted(expected, key=lambda p: p.name))
         self.assertFalse(first_render.exists())
         self.assertTrue(second_render.exists())
         self.assertTrue(unknown.exists())
         self.assertTrue(self.song.restore(first.num))
         restored = self.song.get(first.num)
-        self.assertIsNone(self.song.cached_polished(restored, "gentle", "recipe-a"))
-        self.assertEqual(self.song.cached_polished(second, "strong", "recipe-b"), second_render)
+        self.assertIsNone(self.song.cached_polished(restored, "some-some", "recipe-a"))
+        self.assertEqual(self.song.cached_polished(second, "lots-lots", "recipe-b"), second_render)
 
     def test_corrupt_index_is_a_safe_miss_and_prunes_only_known_cache_files(self):
         take, data = self.add_audio_take()
-        render = self.song.publish_polished(take, "gentle", "recipe-a", data, self.RATE)
+        render = self.song.publish_polished(take, "some-some", "recipe-a", data, self.RATE)
         unknown = self.song.polished_dir / "notes.wav"
         unknown.write_bytes(b"keep")
         self.song.polish_index_path.write_text("{not json", encoding="ascii")
 
-        self.assertIsNone(self.song.cached_polished(take, "gentle", "recipe-a"))
+        self.assertIsNone(self.song.cached_polished(take, "some-some", "recipe-a"))
         self.assertEqual(self.song.prune_polished(), [render])
         self.assertFalse(render.exists())
         self.assertTrue(unknown.exists())
