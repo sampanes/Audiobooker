@@ -7,5 +7,7 @@ settings.json
 take-recorder.pid
 take-recorder.log
 
-# Plugin probe audio (the report-*.md files are meant to be committed)
+# Plugin probe: audio and plain reports stay local (they list installed
+# plugins); only the password-protected report.7z is committed
 plugin-probe/out/
+plugin-probe/report-*.md

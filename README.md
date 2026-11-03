@@ -1,11 +1,18 @@
 # Take Recorder
 
-> **At home (the PC with FL Studio and the plugins): double-click
-> `probe-plugins.bat`.** It checks whether Auto-Tune, Graillon, MAutoPitch,
-> Melda, Valhalla and iZotope plugins load and work *outside* FL Studio, writes
-> `plugin-probe/report-<date>.md`, and saves what each plugin did to the test
-> voice in `plugin-probe/out/`. Answer any license window that pops up. Then
-> commit and push the report so the next step can be built on what works.
+> **Plugin probe results** are in `plugin-probe/report.7z`, password-protected
+> because the report lists every plugin installed on that PC. Extract with
+> `"C:\Program Files\7-Zip\7z.exe" x plugin-probe\report.7z -oplugin-probe`
+> (it asks for the password).
+>
+> To probe again, double-click `probe-plugins.bat` on the PC with the plugins.
+> It checks whether Auto-Tune, Graillon, MAutoPitch, Melda, Valhalla and
+> iZotope plugins work *outside* FL Studio, writes `plugin-probe/report-<date>.md`
+> (git-ignored), and saves what each plugin did to a test voice in
+> `plugin-probe/out/`. To share a new report, encrypt it (names hidden too) and
+> commit only the `.7z`:
+> `cd plugin-probe` then
+> `"C:\Program Files\7-Zip\7z.exe" a -t7z -mhe=on -p report.7z report-<date>.md`
 
 Record yourself singing, keep the good takes, trash the bad ones -- all from the
 keyboard, without stopping to fiddle with a DAW.

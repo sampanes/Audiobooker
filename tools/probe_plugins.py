@@ -8,8 +8,9 @@ Each plugin loads in its own process, so a crash or a hung license window
 only loses that one plugin. If a license or activation window appears, deal
 with it (or close it); the probe waits up to 10 minutes per plugin.
 
-Writes plugin-probe/report-<date>.md (commit it so other machines can read it)
-and the processed audio to plugin-probe/out/ (listen to judge quality and to
+Writes plugin-probe/report-<date>.md (git-ignored: it lists the installed
+plugins; share it as a password-protected report.7z, see the README) and the
+processed audio to plugin-probe/out/ (listen to judge quality and to
 hear demo-mode noise or silence).
 """
 
@@ -361,8 +362,10 @@ def main():
     report = write_report(results, everything, set(targets))
     print(f"\nReport: {report}")
     print(f"Audio:  {OUT_DIR / 'out'}  (listen for quality, noise bursts, silence)")
-    print("To get the results to the other PC: git add plugin-probe/report-*.md, "
-          "commit, push.")
+    print("To share the results: the report lists your installed plugins, so it is "
+          "git-ignored.\nEncrypt it and commit only the .7z (see the README):\n"
+          f'  cd plugin-probe & "C:\\Program Files\\7-Zip\\7z.exe" a -t7z -mhe=on -p '
+          f"report.7z {report.name}")
     return 0
 
 
