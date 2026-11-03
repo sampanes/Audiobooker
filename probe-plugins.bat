@@ -3,6 +3,7 @@ rem Plugin probe: can Auto-Tune, Graillon, Melda, Valhalla, iZotope... run
 rem outside FL Studio? Loads each one, plays a test voice through it, and
 rem writes plugin-probe\report-<date>.md plus the processed audio.
 rem Pass --all to probe every VST3 plugin, not just the vocal ones.
+rem Pass --engines to only check the recorder's Pitch/Tone plugin engines.
 setlocal
 cd /d "%~dp0"
 

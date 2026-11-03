@@ -17,6 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 import soundfile as sf
 
 import engine
+import plugins
 import polish
 import ui
 from takes import TRACK_EXTENSIONS, Song
@@ -39,6 +40,8 @@ DEFAULTS = {
     "polish": "off",
     "playback": "headphones",  # headphones | speakers | both
     "speakers": "",  # output name for "speakers"; empty = best guess
+    "pitch_engine": "auto",  # auto | builtin | a plugin engine id (plugins.ENGINES)
+    "room_engine": "auto",
 }
 INPUT_CHOICES = {"1": [0], "2": [1], "1+2": [0, 1]}
 SAMPLE_RATES = ("auto", "44100", "48000", "96000")
@@ -138,6 +141,10 @@ class App:
         self._focus_state = None
         self.playing_num = None
         self.playing_mode = None
+        self.playing_engines = {}
+        self.playing_fallback = None
+        self.plugins_found = plugins.find_installed()
+        self._failed_engines = {}
         self._play_request_id = 0
         self._pending_play = None
         self._polishing = None
@@ -414,12 +421,28 @@ class App:
         cal.pack(side="left", padx=(px(10), 0))
         self.track_widgets.append(cal)
 
-        section(9, "INTERFACE")
+        section(9, "PLUGINS")
+        self.engine_vars, self.engine_boxes = {}, {}
+        for row, kind, text in ((10, "pitch", "Pitch by"), (11, "room", "Room by")):
+            cell = field(row, text)
+            var = self.engine_vars[kind] = tk.StringVar()
+            box = self.engine_boxes[kind] = ttk.Combobox(
+                cell, textvariable=var, width=26, state="readonly", takefocus=0)
+            box.pack(side="left")
+            box.bind("<<ComboboxSelected>>", lambda e, k=kind: self.on_engine(k))
+            if kind == "room":
+                ui.label(cell, "Tone Lots only", size=9).pack(side="left", padx=(px(6), 0))
+        self.plugins_label = ui.label(win, "", size=9, anchor="w", justify="left",
+                                      wraplength=px(460))
+        self.plugins_label.grid(row=12, column=0, columnspan=2, sticky="w")
+        self._refresh_engine_boxes()
+
+        section(13, "INTERFACE")
         self.device_label = ui.label(win, "", size=9, anchor="w", justify="left",
                                      wraplength=px(460))
-        self.device_label.grid(row=10, column=0, columnspan=2, sticky="w")
+        self.device_label.grid(row=14, column=0, columnspan=2, sticky="w")
         buttons = tk.Frame(win, bg=C["bg"])
-        buttons.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(px(8), 0))
+        buttons.grid(row=15, column=0, columnspan=2, sticky="ew", pady=(px(8), 0))
         ttk.Button(buttons, text="Reconnect", style="Small.TButton", takefocus=0,
                    command=self._act(lambda: self.connect(refresh=True))).pack(side="left")
         ttk.Button(buttons, text="Close", takefocus=0,
@@ -505,17 +528,7 @@ class App:
                         if not self._render_job_current(job):
                             path = None
                         elif path is None:
-                            source_stamp = song.polish_source_stamp(take)
-                            data, rate = sf.read(str(take.path), dtype="float32", always_2d=True)
-                            data = polish.render(
-                                data, rate, job["mode"], job["key"],
-                                cancel=lambda: not self._render_job_current(job))
-                            if self._render_job_current(job):
-                                path = song.publish_polished(
-                                    take, job["mode"], job["recipe"], data, rate,
-                                    expected_source=source_stamp)
-                            else:
-                                path = None
+                            path = self._render_take(job)
                         result = path
                 elif job["kind"] == "key":
                     if self._key_job_current(job):
@@ -533,6 +546,32 @@ class App:
                 result, error = None, exc
             self._work_results.put((job, result, error))
             del job, result, error
+
+    def _render_take(self, job):
+        """Render and cache a take (worker thread). Plugins fall back to built-in."""
+        song, take, mode = job["song"], job["take"], job["mode"]
+        recipe = job["recipe"]
+        current = lambda: self._render_job_current(job)  # noqa: E731
+        source_stamp = song.polish_source_stamp(take)
+        source, rate = sf.read(str(take.path), dtype="float32", always_2d=True)
+        data = None
+        if job.get("engines"):
+            try:
+                data = plugins.render_isolated(source, rate, mode, job["key"], job["engines"],
+                                               job.get("plugins", {}),
+                                               cancel=lambda: not current())
+            except plugins.PluginFailed as exc:
+                job["fallback"] = (exc.engine or next(iter(job["engines"].values())), str(exc))
+                recipe = polish.recipe_hash(mode, job["key"])
+                cached = song.cached_polished(take, mode, recipe)
+                if cached is not None:
+                    return cached
+        if data is None:
+            data = polish.render(source, rate, mode, job["key"], cancel=lambda: not current())
+        if not current():
+            return None
+        return song.publish_polished(take, mode, recipe, data, rate,
+                                     expected_source=source_stamp)
 
     def _poll_work_results(self):
         while True:
@@ -553,6 +592,12 @@ class App:
             return
         self._pending_play = None
         self._polishing = None
+        fallback = job.get("fallback")
+        if fallback is not None:
+            engine_id, why = fallback
+            print(f"[{PROCESS_TITLE}] plugin fell back to built-in: {why}")
+            self._failed_engines[engine_id] = why
+            self._refresh_engine_boxes()
         if error is not None:
             messagebox.showerror("Take Recorder",
                                  f"Could not polish take {job['take'].label}:\n{error}")
@@ -561,6 +606,9 @@ class App:
         if take is None or take.trashed:
             return
         self._start_playback(take, path, job["mode"], job["request_id"], job["song"])
+        if self.playing_num == take.num:
+            self.playing_engines = {} if fallback else dict(job.get("engines") or {})
+            self.playing_fallback = fallback[0] if fallback else None
 
     def _finish_key_estimate(self, job, result, error):
         if (self._closing or self._estimating_key is not job or
@@ -850,6 +898,68 @@ class App:
         self.root.focus_set()
         if self.route_var.get() != "headphones":
             self._replay_on_new_route()
+
+    # ---- plugin engines ------------------------------------------------------
+
+    def _engine_choice_labels(self, kind):
+        """[(setting value, label)] for a kind's Settings box."""
+        best = plugins.resolve(kind, plugins.AUTO, self.plugins_found, self._failed_engines)
+        auto = f"Auto  ({plugins.short_name(best) if best else 'built-in'})"
+        rows = [(plugins.AUTO, auto), (plugins.BUILTIN, "Built-in")]
+        rows += [(e, plugins.short_name(e) + ("  (failed)" if e in self._failed_engines else ""))
+                 for e in plugins.choices(kind, self.plugins_found)]
+        return rows
+
+    def _refresh_engine_boxes(self):
+        if not hasattr(self, "engine_boxes"):
+            return
+        for kind, box in self.engine_boxes.items():
+            rows = self._engine_choice_labels(kind)
+            box.config(values=[label for _, label in rows])
+            wanted = self.settings.get(f"{kind}_engine", plugins.AUTO)
+            label = next((l for v, l in rows if v == wanted), rows[0][1])
+            self.engine_vars[kind].set(label)
+        found = [plugins.short_name(e) for e in plugins.ENGINES
+                 if e in self.plugins_found and not plugins.ENGINES[e].hidden]
+        lines = [("Found: " + ", ".join(found)) if found else
+                 "No supported plugins found in Common Files\\VST3, so the built-in "
+                 "sound is used."]
+        lines += [f"Skipped until you pick it again: {why}"
+                  for why in self._failed_engines.values()]
+        self.plugins_label.config(text="\n".join(lines))
+
+    def on_engine(self, kind):
+        label = self.engine_vars[kind].get()
+        value = next((v for v, l in self._engine_choice_labels(kind) if l == label),
+                     plugins.AUTO)
+        self._failed_engines.pop(value, None)  # picking it again means: try it again
+        self.settings[f"{kind}_engine"] = value
+        save_settings(self.settings)
+        self._refresh_engine_boxes()
+        self.root.focus_set()
+        self._replay_on_new_route()
+
+    def _engines_for(self, mode):
+        """{kind: engine id} of the plugins a render of mode would use."""
+        pick = {kind: plugins.resolve(kind, self.settings.get(f"{kind}_engine", plugins.AUTO),
+                                      self.plugins_found, self._failed_engines)
+                for kind in plugins.KINDS}
+        return plugins.active_engines(mode, pick["pitch"], pick["room"])
+
+    def _describe(self, mode, engines=None, fallback=None):
+        pitch, tone = polish.split_mode(mode)
+        if (pitch, tone) == ("none", "none"):
+            return "raw"
+        engines = engines or {}
+        text = f"pitch {pitch}"
+        if engines.get("pitch"):
+            text += f" by {plugins.short_name(engines['pitch'])}"
+        text += f", tone {tone}"
+        if engines.get("room"):
+            text += f" + {plugins.short_name(engines['room'])}"
+        if fallback:
+            text += f"  (built-in: {plugins.short_name(fallback)} failed)"
+        return text
 
     def on_route(self):
         route = self.route_var.get()
@@ -1163,13 +1273,15 @@ class App:
             return
         try:
             key = polish.parse_key(self._song_key_name())
-            recipe = polish.recipe_hash(mode, key)
+            engines = self._engines_for(mode)
+            recipe = polish.recipe_hash(mode, key, plugins.recipe(engines))
         except Exception as exc:
             messagebox.showerror("Take Recorder",
                                  f"Could not prepare take {take.label}:\n{exc}")
             return
         job = {"kind": "render", "request_id": request_id, "song": song,
                "take": take, "mode": mode, "key": key, "recipe": recipe,
+               "engines": engines, "plugins": dict(self.plugins_found),
                "cancel": threading.Event()}
         self._pending_play = job
         self._polishing = job
@@ -1198,6 +1310,8 @@ class App:
         self._polishing = None
         self.playing_num = current.num
         self.playing_mode = mode
+        self.playing_engines = {}
+        self.playing_fallback = None
         self._update_device_label()
 
     def stop_playback(self):
@@ -1442,9 +1556,10 @@ class App:
         """Which version is playing or being prepared, in words."""
         job = self._polishing
         if job is not None:
-            return polish.describe_mode(job["mode"])
+            return self._describe(job["mode"], job.get("engines"))
         if self.playing_num is not None and self.playing_mode is not None:
-            return f"hearing {polish.describe_mode(self.playing_mode)}"
+            return "hearing " + self._describe(self.playing_mode, self.playing_engines,
+                                               self.playing_fallback)
         return ""
 
     def _update_play_button(self):

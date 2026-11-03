@@ -278,7 +278,7 @@ def verdict(r):
                                        f"(in {default['in_rms_db']})"])
 
 
-def write_report(results, everything, probed):
+def write_report(results, everything, probed, engine_rows=()):
     OUT_DIR.mkdir(exist_ok=True)
     path = OUT_DIR / f"report-{datetime.date.today().isoformat()}.md"
     lines = [f"# Plugin probe {datetime.datetime.now():%Y-%m-%d %H:%M}", "",
@@ -290,7 +290,10 @@ def write_report(results, everything, probed):
         v, why = verdict(r)
         name = r.get("name") or Path(r["path"]).stem
         lines.append(f"| {name} | **{v}** | {why} |")
-    lines += ["", f"## All VST3 plugins found ({len(everything)})", ""]
+    lines += [""]
+    if engine_rows:
+        lines += engine_report_lines(engine_rows)
+    lines += [f"## All VST3 plugins found ({len(everything)})", ""]
     lines += [f"- {'(probed) ' if p in probed else ''}`{p}`" for p in everything]
     lines += ["", "## Details", ""]
     for r in results:
@@ -302,6 +305,81 @@ def write_report(results, everything, probed):
                       json.dumps(r["params"], indent=1, default=str), "```", "</details>", ""]
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+# ---- the app's own engines (plugins.py), as the recorder will use them ---------------------
+
+def engine_cases(installed):
+    """(engine id, mode, key, expected cents or None) for every installed engine."""
+    import plugins
+    cases = []
+    for engine_id in plugins.choices("pitch", installed):
+        cases += [(engine_id, "some-none", None, None), (engine_id, "lots-none", None, 0.0),
+                  # A is not in Ab major: the nearest allowed note is Bb, 100 cents up
+                  (engine_id, "lots-none", "Ab major", 100.0)]
+    for engine_id in plugins.choices("room", installed):
+        cases.append((engine_id, "none-lots", None, None))
+    return cases
+
+
+def check_engines(installed):
+    """Render the test voice through each engine exactly as the recorder would."""
+    import plugins
+    dry = test_voice()
+    rows = []
+    cases = [("builtin", m, k, e) for m, k, e in (("some-none", None, None),
+                                                  ("lots-none", None, 0.0),
+                                                  ("lots-none", "Ab major", 100.0),
+                                                  ("none-lots", None, None))]
+    for engine_id, mode, key, expected in cases + engine_cases(installed):
+        label = f"{engine_id} {mode}" + (f" in {key}" if key else "")
+        print(f"- engine {label}...", flush=True)
+        row = {"engine": engine_id, "mode": mode, "key": key or "Chromatic",
+               "expected_cents": expected}
+        started = time.perf_counter()
+        try:
+            if engine_id == "builtin":
+                wet = polish.render(dry.T, RATE, mode, key)
+            else:
+                kind = plugins.ENGINES[engine_id].kind
+                wet = plugins.render_isolated(dry.T, RATE, mode, key, {kind: engine_id},
+                                              installed, timeout=PER_PLUGIN_TIMEOUT_S)
+            row.update(measure(dry, np.asarray(wet).T))
+            stem = f"engine-{engine_id}-{mode}" + (f"-{key.replace(' ', '-')}" if key else "")
+            sf.write(str(OUT_DIR / "out" / f"{stem}.wav"), np.asarray(wet), RATE,
+                     subtype="PCM_24")
+        except plugins.PluginFailed as exc:
+            row["error"] = str(exc)
+        row["seconds"] = round(time.perf_counter() - started, 1)
+        row["verdict"] = engine_verdict(row)
+        print(f"    {row['verdict']}", flush=True)
+        rows.append(row)
+    return rows
+
+
+def engine_verdict(row):
+    if "error" in row:
+        return "FELL BACK: " + row["error"]
+    if row["silent"] or not row["finite"]:
+        return "BAD OUTPUT"
+    cents = row["pitch_cents"]
+    heard = "no pitch measured" if cents is None else f"{cents:+.1f} cents"
+    if row["expected_cents"] is None:
+        return f"ok, {heard}, {row['out_rms_db']} dB rms"
+    if cents is not None and abs(cents - row["expected_cents"]) < 15:
+        return f"OK: {heard} (want {row['expected_cents']:+.0f})"
+    return f"WRONG: {heard} (want {row['expected_cents']:+.0f})"
+
+
+def engine_report_lines(rows):
+    lines = ["## App engines", "",
+             "The test voice (A3, 40 cents sharp) through each engine with the recorder's own",
+             "settings (plugins.py). Some = gentle; Lots in Chromatic should land near 0;",
+             "Lots in Ab major should land near +100 (Bb), proving the Key reaches the plugin.",
+             "", "| Engine | Mode | Key | Result | Seconds |", "|---|---|---|---|---|"]
+    lines += [f"| {r['engine']} | {r['mode']} | {r['key']} | {r['verdict']} | {r['seconds']} |"
+              for r in rows]
+    return lines + [""]
 
 
 def selftest():
@@ -328,6 +406,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--all", action="store_true", help="probe every VST3, not just vocal ones")
     ap.add_argument("--selftest", action="store_true", help="check the probe itself")
+    ap.add_argument("--engines", action="store_true",
+                    help="only check the recorder's plugin engines (skip the raw probe)")
     ap.add_argument("--one", help=argparse.SUPPRESS)
     ap.add_argument("--plugin-name", help=argparse.SUPPRESS)
     args = ap.parse_args()
@@ -341,9 +421,10 @@ def main():
         return 0
 
     everything = find_vst3()
-    targets = everything if args.all else [p for p in everything if wanted(p)]
+    targets = [] if args.engines else everything if args.all else [
+        p for p in everything if wanted(p)]
     print(f"Found {len(everything)} VST3 plugins; probing {len(targets)}.")
-    if not targets:
+    if not targets and not args.engines:
         print("Nothing to probe. Looked in: " + ", ".join(str(d) for d in VST3_DIRS))
     import pedalboard
     results = []
@@ -359,7 +440,10 @@ def main():
             results.append(r)
             v, why = verdict(r)
             print(f"    {v}: {why}", flush=True)
-    report = write_report(results, everything, set(targets))
+    import plugins
+    print("\nChecking the recorder's plugin engines (Pitch and Tone settings)...")
+    engine_rows = check_engines(plugins.find_installed())
+    report = write_report(results, everything, set(targets), engine_rows)
     print(f"\nReport: {report}")
     print(f"Audio:  {OUT_DIR / 'out'}  (listen for quality, noise bursts, silence)")
     print("To share the results: the report lists your installed plugins, so it is "

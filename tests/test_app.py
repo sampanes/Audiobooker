@@ -140,6 +140,58 @@ class PlaybackStateTest(unittest.TestCase):
             self.assertEqual(raw_path.read_bytes(), raw_before)
             self.assertEqual(song.cached_polished(take, "lots-lots", job["recipe"]), path)
 
+    def _plugin_job(self, tmp, engines):
+        song = Song(Path(tmp), "demo")
+        num, raw_path = song.next_path()
+        rate = 48000
+        time = np.arange(rate // 2) / rate
+        source = (0.15 * np.sin(2.0 * np.pi * 226.0 * time)).astype(np.float32)
+        sf.write(raw_path, source, rate, subtype="PCM_24")
+        song.record(num, len(source) / rate, -16.0, False, 0)
+        instance = recorder_app.App.__new__(recorder_app.App)
+        instance._closing = False
+        instance._play_request_id = 4
+        instance.song = song
+        instance._work_queue = queue.Queue()
+        instance._work_results = queue.SimpleQueue()
+        recipe = polish.recipe_hash("lots-none", None, recorder_app.plugins.recipe(engines))
+        job = {"kind": "render", "request_id": 4, "song": song, "take": song.get(num),
+               "mode": "lots-none", "key": None, "recipe": recipe, "engines": engines,
+               "plugins": {}, "cancel": threading.Event()}
+        instance._pending_play = job
+        instance._work_queue.put(job)
+        instance._work_queue.put(None)
+        instance._work_loop()
+        made_job, path, error = instance._work_results.get_nowait()
+        return song, job, path, error
+
+    def test_worker_caches_a_plugin_render_under_the_plugin_recipe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            song, job, path, error = self._plugin_job(tmp, {"pitch": "test-shift"})
+            self.assertIsNone(error)
+            self.assertNotIn("fallback", job)
+            self.assertEqual(song.cached_polished(job["take"], "lots-none", job["recipe"]),
+                             path)
+
+    def test_worker_falls_back_to_builtin_when_the_plugin_crashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            song, job, path, error = self._plugin_job(tmp, {"pitch": "test-crash"})
+            self.assertIsNone(error)
+            self.assertEqual(job["fallback"][0], "test-crash")
+            builtin = polish.recipe_hash("lots-none", None)
+            self.assertEqual(song.cached_polished(job["take"], "lots-none", builtin), path)
+            self.assertIsNone(song.cached_polished(job["take"], "lots-none", job["recipe"]))
+
+    def test_describe_names_plugins_and_fallbacks(self):
+        instance = recorder_app.App.__new__(recorder_app.App)
+        self.assertEqual(instance._describe("off"), "raw")
+        self.assertEqual(
+            instance._describe("lots-lots", {"pitch": "auto-tune-access",
+                                             "room": "valhalla-room"}),
+            "pitch lots by Auto-Tune Access, tone lots + ValhallaRoom")
+        self.assertEqual(instance._describe("some-none", {}, "mautopitch"),
+                         "pitch some, tone none  (built-in: MAutoPitch failed)")
+
     def test_worker_does_not_read_raw_after_cache_check_is_cancelled(self):
         instance = recorder_app.App.__new__(recorder_app.App)
         instance._closing = False

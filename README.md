@@ -1,5 +1,13 @@
 # Take Recorder
 
+> **At home: Pitch and Tone now use your plugins.** After pulling, start the
+> app as usual: Pitch uses Auto-Tune Access (then EFX+, MAutoPitch, Graillon)
+> and Tone Lots adds ValhallaRoom, whichever is installed. The line under the
+> status band says which one you are hearing; Settings > PLUGINS picks another
+> or Built-in. To check them all against a test voice, run
+> `probe-plugins.bat --engines` (a minute or two) and share the new report the
+> same way as before.
+>
 > **Plugin probe results** are in `plugin-probe/report.7z`, password-protected
 > because the report lists every plugin installed on that PC. Extract with
 > `"C:\Program Files\7-Zip\7z.exe" x plugin-probe\report.7z -oplugin-probe`
@@ -146,8 +154,25 @@ is never touched.
 
 Both on None plays the untouched recording. Any other mix is rendered once,
 cached, and played; while it renders the status band says `POLISHING`, and
-the line under it names what you are hearing. All of this processing is done
-by this app's own code (`polish.py`), offline: no plugins, no network, no AI.
+the line under it names what you are hearing. Everything is offline: no
+network, no AI.
+
+**Who does the work.** The app's own code (`polish.py`) always can. If a
+supported plugin is installed (`plugins.py`; found in `Common Files\VST3`),
+it takes over:
+
+| Stage | Plugins, in the order Auto picks them | Some | Lots |
+|-------|---------------------------------------|------|------|
+| Pitch | Auto-Tune Access, Auto-Tune EFX+, MAutoPitch, Graillon 2 | slower retune, humanize | fastest retune |
+| Room (Tone Lots) | ValhallaRoom, ValhallaVintageVerb, MCharmVerb | -- | a short, quiet room |
+
+Tone's rumble cut, presence lift and compression stay built-in. Settings >
+PLUGINS chooses Auto, Built-in or a specific plugin for each stage. Plugins run
+in a separate process, so a plugin that crashes, plays silence or sits behind a
+license window costs one render: the take plays with the built-in sound, the
+line under the status band says so, and that plugin is skipped until you pick
+it again in Settings. The knob settings per plugin are starting points in
+`plugins.py`; changing them (and `RECIPE_VERSION`) re-renders cached takes.
 
 The Key control limits pitch correction to a major or minor scale. Loading a
 backing track estimates its key once; uncertain estimates fall back to
@@ -178,6 +203,8 @@ song opens.
 | `polish`          | `"off"`                       | Playback pitch and tone: `off`, or `<pitch>-<tone>` with each `none`/`some`/`lots` (e.g. `lots-none`). Old `gentle`/`strong` still load. |
 | `playback`        | `"headphones"`                | Play on: `headphones`, `speakers`, or `both` |
 | `speakers`        | `""` (best guess)             | Output name used for speakers              |
+| `pitch_engine`    | `"auto"`                      | Pitch plugin: `auto`, `builtin`, or an id from `plugins.py` (`auto-tune-access`, `auto-tune-efx`, `mautopitch`, `graillon`) |
+| `room_engine`     | `"auto"`                      | Room for Tone Lots: `auto`, `builtin`, `valhalla-room`, `valhalla-vintageverb`, `mcharmverb` |
 
 Per-song track settings (track file, start point, count-in and vocal key) live
 in `takes/<song>/song.json`; per-take details live in
@@ -189,6 +216,7 @@ in `takes/<song>/song.json`; per-take details live in
 app.py       Tkinter window, hotkeys, meter
 engine.py    Input stream, take writer, backing track + alignment, playback
 polish.py    Offline pitch correction, key estimation and vocal polish
+plugins.py   Optional plugin engines (Auto-Tune, Melda, Valhalla...), run in a child process
 takes.py     Song folders, metadata, crash recovery and polished cache
 tests/       python -m unittest discover -s tests -t .
 ```

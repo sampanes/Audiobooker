@@ -2,8 +2,9 @@
 
 Sound good provides optional, offline vocal processing for recorded takes. The
 current Pitch and Tone controls (None / Some / Lots each) are described in
-the README. `probe-plugins.bat` tests which installed plugins can be hosted
-outside a DAW (via pedalboard) before any plugin backend is built. This document
+the README. Installed plugins (Auto-Tune, MAutoPitch, Graillon, Valhalla,
+Melda) can do the pitch and room stages through `plugins.py`, chosen by what
+`probe-plugins.bat` measured would host outside a DAW (via pedalboard). This document
 captures possible improvements, not promises or supported integrations.
 
 ## Goals

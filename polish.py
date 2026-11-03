@@ -162,8 +162,12 @@ def snap_midi(midi, key=None):
     return float(result) if values.ndim == 0 else result
 
 
-def recipe_hash(mode, key=None):
-    """Return a stable cache key for every setting that changes a render."""
+def recipe_hash(mode, key=None, engines=None):
+    """Return a stable cache key for every setting that changes a render.
+
+    engines is plugins.recipe() for the plugin engines in use; empty or None
+    (the built-in code) leaves the hash exactly as it always was.
+    """
     mode = normalize_mode(mode)
     spec = parse_key(key)
     pitch, tone = split_mode(mode)
@@ -174,6 +178,8 @@ def recipe_hash(mode, key=None):
         "pitch": _PITCH.get(pitch, {}),
         "tone": _TONE.get(tone, {}),
     }
+    if engines:
+        payload["engines"] = engines
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
     return hashlib.sha256(encoded).hexdigest()[:20]
 
@@ -503,20 +509,27 @@ def _add_reverb(data, rate, mix):
     return data * (1.0 - mix) + wet * mix
 
 
-def _process_active(data, rate, mode, key, cancel=None):
+def _process_active(data, rate, mode, key, cancel=None, stages=None):
     raw = np.asarray(data, dtype=np.float64)
     _check_cancel(cancel)
     pitch, tone = split_mode(mode)
+    stages = stages or {}
     processed = raw
     if pitch != "none":
-        processed = _pitch_correct(processed, rate, pitch, key, cancel)
+        if "pitch" in stages:
+            processed = stages["pitch"](processed)
+        else:
+            processed = _pitch_correct(processed, rate, pitch, key, cancel)
         _check_cancel(cancel)
     if tone != "none":
         processed = _spectral_polish(processed, rate, tone, cancel)
         _check_cancel(cancel)
         processed = _compress(processed, rate, tone)
         _check_cancel(cancel)
-        processed = _add_reverb(processed, rate, _TONE[tone]["reverb_mix"])
+        if "room" in stages and _TONE[tone]["reverb_mix"] > 0.0:
+            processed = stages["room"](processed)
+        else:
+            processed = _add_reverb(processed, rate, _TONE[tone]["reverb_mix"])
         _check_cancel(cancel)
 
     raw_rms = float(np.sqrt(np.mean(raw * raw)))
@@ -538,11 +551,12 @@ def _process_active(data, rate, mode, key, cancel=None):
     return processed
 
 
-def render(data, rate, mode, key=None, cancel=None):
+def render(data, rate, mode, key=None, cancel=None, stages=None):
     """Render a mode without changing its timeline.
 
     cancel may be a zero-argument callback. A truthy result stops work by
-    raising RenderCancelled.
+    raising RenderCancelled. stages maps "pitch" and/or "room" to a function
+    (audio -> audio) that replaces that built-in stage (a plugin; see plugins.py).
     """
     mode = normalize_mode(mode)
     spec = parse_key(key)
@@ -570,7 +584,7 @@ def render(data, rate, mode, key=None, cancel=None):
     first, last = int(active_rows[0]), int(active_rows[-1]) + 1
     _check_cancel(cancel)
     result[first:last] = _process_active(
-        frames[first:last], int(rate), mode, spec, cancel).astype(np.float32)
+        frames[first:last], int(rate), mode, spec, cancel, stages).astype(np.float32)
     _check_cancel(cancel)
     return result[:, 0] if was_mono else result
 
