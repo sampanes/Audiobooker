@@ -6,3 +6,6 @@ takes/
 settings.json
 take-recorder.pid
 take-recorder.log
+
+# Plugin probe audio (the report-*.md files are meant to be committed)
+plugin-probe/out/

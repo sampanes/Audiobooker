@@ -1,5 +1,12 @@
 # Take Recorder
 
+> **At home (the PC with FL Studio and the plugins): double-click
+> `probe-plugins.bat`.** It checks whether Auto-Tune, Graillon, MAutoPitch,
+> Melda, Valhalla and iZotope plugins load and work *outside* FL Studio, writes
+> `plugin-probe/report-<date>.md`, and saves what each plugin did to the test
+> voice in `plugin-probe/out/`. Answer any license window that pops up. Then
+> commit and push the report so the next step can be built on what works.
+
 Record yourself singing, keep the good takes, trash the bad ones -- all from the
 keyboard, without stopping to fiddle with a DAW.
 

@@ -1,7 +1,9 @@
 # Sound good: future directions
 
 Sound good provides optional, offline vocal processing for recorded takes. The
-current Off, Gentle, and Strong modes are described in the README. This document
+current Pitch and Tone controls (None / Some / Lots each) are described in
+the README. `probe-plugins.bat` tests which installed plugins can be hosted
+outside a DAW (via pedalboard) before any plugin backend is built. This document
 captures possible improvements, not promises or supported integrations.
 
 ## Goals
