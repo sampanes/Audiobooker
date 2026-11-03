@@ -38,6 +38,10 @@ take selected in the list, or the take you just finished. A new take is
 selected as soon as it stops, so Space then G or B always judges what you just
 sang. Clicking an older take lets G or B judge that one instead.
 
+The big status band says what is happening (with a thin progress bar during
+playback, the count-in and a take over a track), and the line under it names
+the take G or B will judge.
+
 The bar at the top of the window says where your keystrokes go: green **KEYS ON**
 means they control the recorder, yellow means you are typing in a text box, and
 when another window has the keyboard the recorder fades out.
@@ -110,7 +114,7 @@ marks it `RECOVERED` in the list.
 
 ## Sound good playback
 
-Use **Off / Gentle / Strong** beside Play to compare a take with offline vocal
+Use **Off / Gentle / Strong** under Play to compare a take with offline vocal
 polish. Off always plays the untouched recording. Gentle applies slower,
 partial pitch correction and a light vocal chain; Strong snaps harder and adds
 a small amount of ambience. Press V to cycle the modes. If a polished version

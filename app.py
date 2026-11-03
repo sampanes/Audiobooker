@@ -18,6 +18,7 @@ import soundfile as sf
 
 import engine
 import polish
+import ui
 from takes import TRACK_EXTENSIONS, Song
 
 HERE = Path(__file__).resolve().parent
@@ -43,20 +44,16 @@ INPUT_CHOICES = {"1": [0], "2": [1], "1+2": [0, 1]}
 SAMPLE_RATES = ("auto", "44100", "48000", "96000")
 KEY_CONFIDENCE_MIN = 0.12
 
-METER_W = 640
-BAR_H = 26
 METER_MIN_DB = -60.0
 DECAY_DB_PER_S = 24.0
 HOLD_S = 1.5
 TICK_MS = 33
 UNFOCUSED_ALPHA = 0.55  # window opacity while the keyboard goes somewhere else
 
-C = dict(bg="#1e1f22", panel="#2b2d31", fg="#e6e6e6", dim="#8a8f98", green="#3fb950",
-         yellow="#d29922", red="#f85149", blue="#58a6ff", gold="#e3b341", grey="#5c6370",
-         target="#24382a")
+C = dict(ui.C, stripe="#22252a")
 
-HELP = ("Space record / stop    G good    B bad    P play / stop    "
-        "Ctrl+Z undo    V sound good    O headphones / speakers")
+REC_TEXT, STOP_TEXT = "\u25cf  Record   Space", "\u25a0  Stop   Space"
+PLAY_TEXT, STOP_PLAY_TEXT = "\u25b6  Play   P", "\u25a0  Stop   P"
 
 CALIBRATE_HELP = (
     "This measures the delay between the backing track and your recording, so takes "
@@ -124,11 +121,6 @@ def parse_clock(text):
     return seconds
 
 
-def db_to_x(db):
-    frac = (db - METER_MIN_DB) / -METER_MIN_DB
-    return max(0.0, min(1.0, frac)) * METER_W
-
-
 class App:
     def __init__(self, root, settings):
         self.root = root
@@ -176,245 +168,214 @@ class App:
     def _build(self):
         root = self.root
         root.title("Take Recorder")
-        root.configure(bg=C["bg"])
-        root.minsize(760, 600)
-
-        style = ttk.Style(root)
-        style.theme_use("clam")
-        style.configure(".", background=C["bg"], foreground=C["fg"], fieldbackground=C["panel"])
-        style.configure("Treeview", background=C["panel"], fieldbackground=C["panel"],
-                        foreground=C["fg"], rowheight=26, font=("Segoe UI", 11))
-        style.configure("Treeview.Heading", background=C["bg"], foreground=C["dim"],
-                        font=("Segoe UI", 10, "bold"))
-        style.map("Treeview", background=[("selected", "#3b4252")])
-        style.configure("TButton", background=C["panel"], foreground=C["fg"], padding=(10, 6))
-        style.map("TButton", background=[("active", "#3b4252"), ("disabled", C["bg"])])
-        style.configure("Small.TButton", padding=(6, 2))
-        style.configure("TRadiobutton", background=C["bg"], foreground=C["fg"])
-        style.map("TRadiobutton", background=[("disabled", C["bg"]), ("active", C["bg"])],
-                  foreground=[("disabled", C["dim"])])
-        style.configure("TCheckbutton", background=C["bg"], foreground=C["fg"])
-        style.map("TCheckbutton", background=[("disabled", C["bg"]), ("active", C["bg"])],
-                  foreground=[("disabled", C["dim"])])
-        style.configure("TCombobox", fieldbackground=C["panel"], foreground=C["fg"],
-                        background=C["panel"], arrowcolor=C["fg"])
-        style.map("TCombobox",
-                  fieldbackground=[("readonly", C["panel"]), ("disabled", C["bg"])],
-                  foreground=[("readonly", C["fg"]), ("disabled", C["dim"])],
-                  selectbackground=[("readonly", C["panel"])],
-                  selectforeground=[("readonly", C["fg"])])
-
-        pad = dict(padx=14)
-        entry_opts = dict(bg=C["panel"], fg=C["fg"], insertbackground=C["fg"], relief="flat",
-                          disabledbackground=C["panel"], disabledforeground=C["dim"])
+        self.scale = ui.scale_for(root)
+        px = self.px
+        ui.apply_theme(root, px)
+        root.minsize(px(780), px(700))
 
         # Says whether keystrokes are going to the recorder right now
-        self.focus_label = tk.Label(root, text="", font=("Segoe UI", 9, "bold"), pady=3)
+        self.focus_label = tk.Label(root, text="", font=("Segoe UI", 9, "bold"), pady=px(3))
         self.focus_label.pack(fill="x")
 
-        # Song + input selection
-        top = tk.Frame(root, bg=C["bg"])
-        top.pack(fill="x", pady=(12, 4), **pad)
-        tk.Label(top, text="Song", bg=C["bg"], fg=C["dim"], font=("Segoe UI", 10)).pack(side="left")
+        # Device status. Packed before the body so a short window squeezes the
+        # takes list, never this line.
+        foot = tk.Frame(root, bg=C["panel"], padx=px(14), pady=px(6))
+        foot.pack(fill="x", side="bottom")
+        self.device_dot = tk.Label(foot, text="\u25cf", bg=C["panel"], fg=C["grey"],
+                                   font=("Segoe UI", 10))
+        ttk.Button(foot, text="Reconnect", style="Small.TButton", takefocus=0,
+                   command=self._act(lambda: self.connect(refresh=True))).pack(side="right")
+        self.device_dot.pack(side="left", anchor="n")
+        self.device_label = ui.label(foot, "", size=9, anchor="w", justify="left")
+        self.device_label.pack(side="left", fill="x", expand=True, padx=(px(6), 0))
+
+        body = tk.Frame(root, bg=C["bg"], padx=px(14), pady=px(10))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        gap = dict(sticky="ew", pady=(0, px(8)))
+
+        # ---- setup card: song, input, track --------------------------------
+        setup = ui.card(body, px)
+        setup.grid(row=0, column=0, **gap)
+        setup.columnconfigure(1, weight=1)
+
+        ui.label(setup, "SONG", size=8, weight="bold").grid(row=0, column=0, sticky="w")
+        song_row = tk.Frame(setup, bg=C["panel"])
+        song_row.grid(row=0, column=1, sticky="ew", padx=(px(10), 0))
         self.song_var = tk.StringVar(value=self.song.name)
-        self.song_entry = tk.Entry(top, textvariable=self.song_var, width=28,
-                                   font=("Segoe UI", 12), **entry_opts)
-        self.song_entry.pack(side="left", padx=(8, 6), ipady=3)
+        self.song_entry = ui.entry(song_row, self.song_var, 22, size=13, px=px)
+        self.song_entry.pack(side="left", ipady=px(2))
         self.song_entry.bind("<Return>", self.on_song_enter)
         self.song_entry.bind("<Escape>", self.on_song_escape)
-        ttk.Button(top, text="Open folder", takefocus=0, command=self.open_folder).pack(side="left")
+        ttk.Button(song_row, text="Open folder", takefocus=0,
+                   command=self.open_folder).pack(side="left", padx=(px(6), 0))
 
         self.rate_var = tk.StringVar(value=str(self.settings["samplerate"]))
-        self.rate_box = ttk.Combobox(top, textvariable=self.rate_var, values=SAMPLE_RATES,
-                                     width=7, state="readonly", takefocus=0)
+        self.rate_box = ttk.Combobox(song_row, textvariable=self.rate_var, values=SAMPLE_RATES,
+                                     width=6, state="readonly", takefocus=0)
         self.rate_box.pack(side="right")
         self.rate_box.bind("<<ComboboxSelected>>", self.on_rate)
-        tk.Label(top, text="Hz", bg=C["bg"], fg=C["dim"]).pack(side="right", padx=(10, 4))
+        ui.label(song_row, "Hz").pack(side="right", padx=(px(12), px(4)))
         self.input_var = tk.StringVar(value=self.settings["input"]
                                       if self.settings["input"] in INPUT_CHOICES else "1")
-        self.input_buttons = []
-        for label in reversed(list(INPUT_CHOICES)):
-            b = ttk.Radiobutton(top, text=label, value=label, variable=self.input_var,
-                                takefocus=0, command=self.on_input)
-            b.pack(side="right", padx=2)
-            self.input_buttons.append(b)
-        tk.Label(top, text="Record input", bg=C["bg"], fg=C["dim"]).pack(side="right", padx=(0, 4))
+        self.input_select = ui.Segmented(song_row, self.input_var, list(INPUT_CHOICES),
+                                         self.on_input, px=px)
+        self.input_select.pack(side="right")
+        self.input_buttons = [self.input_select]
+        ui.label(song_row, "Input").pack(side="right", padx=(px(12), px(4)))
 
-        # Backing track
-        trk = tk.Frame(root, bg=C["bg"])
-        trk.pack(fill="x", pady=(2, 4), **pad)
-        tk.Label(trk, text="Track", bg=C["bg"], fg=C["dim"], font=("Segoe UI", 10)).pack(side="left")
-        self.track_label = tk.Label(trk, text="none", bg=C["bg"], fg=C["fg"], anchor="w",
-                                    width=26, font=("Segoe UI", 10))
-        self.track_label.pack(side="left", padx=(8, 4))
+        ui.label(setup, "TRACK", size=8, weight="bold").grid(row=1, column=0, sticky="w",
+                                                             pady=(px(8), 0))
+        trk = tk.Frame(setup, bg=C["panel"])
+        trk.grid(row=1, column=1, sticky="ew", padx=(px(10), 0), pady=(px(8), 0))
+        self.track_label = ui.label(trk, "none", fg=C["fg"], anchor="w")
+        self.track_label.pack(side="left", padx=(0, px(8)))
         self.track_widgets = []
         for text, cmd in (("Load...", self.load_track_dialog), ("Clear", self.clear_track)):
             b = ttk.Button(trk, text=text, style="Small.TButton", takefocus=0, command=cmd)
-            b.pack(side="left", padx=(0, 4))
+            b.pack(side="left", padx=(0, px(4)))
             self.track_widgets.append(b)
-        self.use_track_var = tk.BooleanVar(value=True)
-        cb = ttk.Checkbutton(trk, text="Play while recording", variable=self.use_track_var,
-                             takefocus=0, command=self.on_track_fields)
-        cb.pack(side="left", padx=(6, 10))
-        self.track_widgets.append(cb)
-        self.start_var = tk.StringVar()
-        self.leadin_var = tk.StringVar()
-        for label, var, width in (("Start at", self.start_var, 6), ("Count-in s", self.leadin_var, 4)):
-            tk.Label(trk, text=label, bg=C["bg"], fg=C["dim"]).pack(side="left", padx=(4, 4))
-            e = tk.Entry(trk, textvariable=var, width=width, font=("Segoe UI", 10), **entry_opts)
-            e.pack(side="left", ipady=2)
-            e.bind("<Return>", self.on_track_fields)
-            e.bind("<FocusOut>", self.on_track_fields)
-            self.track_widgets.append(e)
-        self.latency_label = tk.Label(trk, text="", bg=C["bg"], fg=C["dim"], font=("Segoe UI", 9))
         cal = ttk.Button(trk, text="Calibrate", style="Small.TButton", takefocus=0,
                          command=self._act(self.calibrate))
         cal.pack(side="right")
         self.track_widgets.append(cal)
-        self.latency_label.pack(side="right", padx=(0, 6))
+        self.latency_label = ui.label(trk, "", size=9)
+        self.latency_label.pack(side="right", padx=(px(8), px(6)))
 
-        # Meter
-        meter_frame = tk.Frame(root, bg=C["bg"])
-        meter_frame.pack(fill="x", pady=(6, 0), **pad)
-        self.meter = tk.Canvas(meter_frame, width=METER_W + 130,
-                               height=BAR_H * engine.METER_CHANNELS + 30,
-                               bg=C["bg"], highlightthickness=0)
-        self.meter.pack(side="left")
-        self._build_meter()
-        self.clip_label = tk.Label(meter_frame, text="CLIP", width=6, bg=C["panel"], fg=C["dim"],
-                                   font=("Segoe UI", 12, "bold"), cursor="hand2")
-        self.clip_label.pack(side="left", padx=(10, 0), ipady=8)
-        self.clip_label.bind("<Button-1>", lambda e: self.reset_clip())
-        tk.Label(root, text="Aim for loudest peaks inside the shaded zone (-18 to -6 dBFS). "
-                            "Set gain on the 26c, not here.",
-                 bg=C["bg"], fg=C["dim"], font=("Segoe UI", 9)).pack(anchor="w", **pad)
+        cue = tk.Frame(setup, bg=C["panel"])
+        cue.grid(row=2, column=1, sticky="ew", padx=(px(10), 0), pady=(px(6), 0))
+        self.use_track_var = tk.BooleanVar(value=True)
+        cb = ttk.Checkbutton(cue, text="Play while recording", variable=self.use_track_var,
+                             style="Card.TCheckbutton", takefocus=0,
+                             command=self.on_track_fields)
+        cb.pack(side="left", padx=(0, px(16)))
+        self.track_widgets.append(cb)
+        self.start_var = tk.StringVar()
+        self.leadin_var = tk.StringVar()
+        for text, var, width in (("Start at", self.start_var, 6),
+                                 ("Count-in s", self.leadin_var, 4)):
+            ui.label(cue, text).pack(side="left", padx=(0, px(4)))
+            e = ui.entry(cue, var, width, px=px)
+            e.pack(side="left", ipady=px(1), padx=(0, px(16)))
+            e.bind("<Return>", self.on_track_fields)
+            e.bind("<FocusOut>", self.on_track_fields)
+            self.track_widgets.append(e)
 
-        # Big status
-        self.status = tk.Label(root, text="", bg=C["panel"], fg=C["fg"],
-                               font=("Segoe UI", 26, "bold"), pady=10)
-        self.status.pack(fill="x", pady=(10, 6), **pad)
+        # ---- input meter -----------------------------------------------------
+        self.meter = ui.Meter(body, engine.METER_CHANNELS, METER_MIN_DB, px,
+                              on_clip_click=self.reset_clip)
+        self.meter.grid(row=1, column=0, sticky="ew", pady=(px(6), 0))
+        ui.label(body, "Loudest notes should peak in the shaded zone (-18 to -6 dBFS). "
+                       "Set gain on the interface, not here.", size=9
+                 ).grid(row=2, column=0, sticky="w", pady=(0, px(10)))
 
-        # Verdict on the take just recorded
-        verdict = tk.Frame(root, bg=C["bg"])
-        verdict.pack(fill="x", pady=(0, 10), **pad)
-        self.verdict_label = tk.Label(verdict, text="", bg=C["bg"], fg=C["dim"], anchor="w",
-                                      font=("Segoe UI", 12))
-        self.verdict_label.pack(side="left", fill="x", expand=True)
-        self.verdict_buttons = []
-        for text, color, cmd in (("BAD  (B)", C["red"], self.mark_bad),
-                                 ("GOOD  (G)", C["green"], self.mark_good)):
-            b = tk.Button(verdict, text=text, command=self._act(cmd), takefocus=0, width=12,
-                          font=("Segoe UI", 15, "bold"), bg=color, fg="#0d1117",
-                          activebackground=C["fg"], disabledforeground="#3a3d44",
-                          relief="flat", cursor="hand2")
-            b.pack(side="right", padx=(8, 0), ipady=4)
-            self.verdict_buttons.append(b)
+        # ---- status band: what is happening, and which take G/B will judge ----
+        hero = tk.Frame(body, bg=C["panel"])
+        hero.grid(row=3, column=0, **gap)
+        hero.columnconfigure(0, weight=1)
+        self.status = tk.Label(hero, text="", bg=C["panel"], fg=C["fg"],
+                               font=("Segoe UI", 22, "bold"), pady=0)
+        self.status.grid(row=0, column=0, sticky="ew", pady=(px(8), 0))
+        self.verdict_label = tk.Label(hero, text="", bg=C["panel"], fg=C["dim"],
+                                      font=("Segoe UI", 11))
+        self.verdict_label.grid(row=1, column=0, sticky="ew", pady=(0, px(6)))
+        self.progress = ui.Progress(hero, px)
+        self.progress.grid(row=2, column=0, sticky="ew")
+        self._status_shown = None
+        self._verdict_live = False
 
-        # Buttons
-        bar = tk.Frame(root, bg=C["bg"])
-        bar.pack(fill="x", **pad)
+        # ---- transport + playback card ----------------------------------------
+        deck = ui.card(body, px)
+        deck.grid(row=4, column=0, **gap)
+        deck.columnconfigure(1, weight=1)
+        transport = tk.Frame(deck, bg=C["panel"])
+        transport.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.buttons = {}
-        for key, text, cmd in (
-                ("rec", "Record (Space)", self.toggle_record),
-                ("undo", "Undo trash (Ctrl+Z)", self.undo_trash)):
-            b = ttk.Button(bar, text=text, takefocus=0, command=self._act(cmd))
-            b.pack(side="left", padx=(0, 6))
+        for key, text, cmd in (("rec", REC_TEXT, self.toggle_record),
+                               ("play", PLAY_TEXT, self.toggle_play),
+                               ("undo", "Undo trash   Ctrl+Z", self.undo_trash)):
+            b = ttk.Button(transport, text=text, takefocus=0, command=self._act(cmd))
+            b.pack(side="left", padx=(0, px(6)))
             self.buttons[key] = b
-        self.show_trash = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="Show trash", variable=self.show_trash, takefocus=0,
-                        command=self.on_show_trash).pack(side="right")
+        self.verdict_buttons = []
+        for text, color, hover, cmd in (("BAD   B", C["red"], "#ff6b63", self.mark_bad),
+                                        ("GOOD   G", C["green"], "#4fd062", self.mark_good)):
+            b = ui.FlatButton(transport, text, self._act(cmd), bg=color, fg=C["ink"], size=13,
+                              hover=hover, padx=px(18), pady=px(4))
+            b.pack(side="right", padx=(px(6), 0))
+            self.verdict_buttons.append((b, color, hover))
 
-        # Playback options get their own compact row so the controls still fit
-        # at the minimum window width.
-        playback = tk.Frame(root, bg=C["bg"])
-        playback.pack(fill="x", pady=(6, 0), **pad)
-        b = ttk.Button(playback, text="Play (P)", takefocus=0,
-                       command=self._act(self.toggle_play))
-        b.pack(side="left", padx=(0, 10))
-        self.buttons["play"] = b
-        tk.Label(playback, text="Sound good (V)", bg=C["bg"], fg=C["dim"]).pack(side="left")
+        ui.label(deck, "Sound good  V").grid(row=1, column=0, sticky="w", pady=(px(10), 0))
+        sound = tk.Frame(deck, bg=C["panel"])
+        sound.grid(row=1, column=1, sticky="ew", padx=(px(10), 0), pady=(px(10), 0))
         self.polish_var = tk.StringVar(value=self.settings["polish"])
-        self.polish_buttons = []
-        for mode in polish.MODES:
-            button = ttk.Radiobutton(playback, text=mode.title(), value=mode,
-                                     variable=self.polish_var, takefocus=0,
-                                     command=self.on_polish_mode)
-            button.pack(side="left", padx=(6, 0))
-            self.polish_buttons.append(button)
+        self.polish_select = ui.Segmented(
+            sound, self.polish_var, polish.MODES, self.on_polish_mode, px=px,
+            labels={m: m.title() for m in polish.MODES}, accent=C["gold"])
+        self.polish_select.pack(side="left")
+        self.polish_buttons = [self.polish_select]
         self.key_var = tk.StringVar(value=self._song_key_name())
-        self.key_box = ttk.Combobox(playback, textvariable=self.key_var,
-                                    values=tuple(polish.KEY_NAMES), width=13,
+        self.key_box = ttk.Combobox(sound, textvariable=self.key_var,
+                                    values=tuple(polish.KEY_NAMES), width=12,
                                     state="readonly", takefocus=0)
         self.key_box.pack(side="right")
         self.key_box.bind("<<ComboboxSelected>>", self.on_key)
-        tk.Label(playback, text="Key", bg=C["bg"], fg=C["dim"]).pack(side="right",
-                 padx=(10, 4))
+        ui.label(sound, "Key").pack(side="right", padx=(px(10), px(4)))
 
         # Where playback goes. Recording over a track always uses the headphones.
-        route = tk.Frame(root, bg=C["bg"])
-        route.pack(fill="x", pady=(6, 0), **pad)
-        tk.Label(route, text="Play on (O)", bg=C["bg"], fg=C["dim"]).pack(side="left")
+        ui.label(deck, "Play on  O").grid(row=2, column=0, sticky="w", pady=(px(6), 0))
+        route = tk.Frame(deck, bg=C["panel"])
+        route.grid(row=2, column=1, sticky="ew", padx=(px(10), 0), pady=(px(6), 0))
         self.route_var = tk.StringVar(value=self.settings["playback"])
-        for value in engine.ROUTES:
-            ttk.Radiobutton(route, text=value.title(), value=value, variable=self.route_var,
-                            takefocus=0, command=self.on_route).pack(side="left", padx=(6, 0))
+        self.route_select = ui.Segmented(route, self.route_var, engine.ROUTES, self.on_route,
+                                         labels={r: r.title() for r in engine.ROUTES}, px=px)
+        self.route_select.pack(side="left")
         self.speakers_var = tk.StringVar()
-        self.speakers_box = ttk.Combobox(route, textvariable=self.speakers_var, width=34,
+        self.speakers_box = ttk.Combobox(route, textvariable=self.speakers_var, width=26,
                                          state="readonly", takefocus=0,
                                          postcommand=self._refresh_speakers)
         self.speakers_box.pack(side="right")
         self.speakers_box.bind("<<ComboboxSelected>>", self.on_speakers)
-        tk.Label(route, text="Speakers", bg=C["bg"], fg=C["dim"]).pack(side="right",
-                 padx=(10, 4))
+        ui.label(route, "Speakers").pack(side="right", padx=(px(10), px(4)))
         self._refresh_speakers()
 
-        # Takes list
+        # ---- takes list ---------------------------------------------------------
+        body.rowconfigure(5, weight=1)
+        listing = tk.Frame(body, bg=C["panel"], padx=px(4), pady=px(4))
+        listing.grid(row=5, column=0, sticky="nsew")
+        head = tk.Frame(listing, bg=C["panel"])
+        head.pack(side="top", fill="x", padx=px(8), pady=(px(2), 0))
+        self.takes_title = ui.label(head, "TAKES", size=8, weight="bold")
+        self.takes_title.pack(side="left")
+        self.show_trash = tk.BooleanVar(value=False)
+        ttk.Checkbutton(head, text="Show trash", variable=self.show_trash, takefocus=0,
+                        style="Card.TCheckbutton",
+                        command=self.on_show_trash).pack(side="right")
         cols = ("take", "length", "peak", "notes")
-        self.tree = ttk.Treeview(root, columns=cols, show="headings", selectmode="browse")
-        for col, text, width, anchor in (("take", "Take", 70, "center"),
-                                         ("length", "Length", 90, "center"),
-                                         ("peak", "Peak dBFS", 100, "center"),
-                                         ("notes", "Notes", 380, "w")):
-            self.tree.heading(col, text=text)
-            self.tree.column(col, width=width, anchor=anchor, stretch=(col == "notes"))
+        self.tree = ttk.Treeview(listing, columns=cols, show="headings", selectmode="browse",
+                                 height=7)
+        for col, text, width, anchor in (("take", "TAKE", 64, "center"),
+                                         ("length", "LENGTH", 84, "center"),
+                                         ("peak", "PEAK dBFS", 92, "center"),
+                                         ("notes", "NOTES", 380, "w")):
+            self.tree.heading(col, text=text, anchor=anchor)
+            self.tree.column(col, width=px(width), anchor=anchor, stretch=(col == "notes"),
+                             minwidth=px(120) if col == "notes" else px(width))
         self.tree.tag_configure("trashed", foreground=C["grey"])
         self.tree.tag_configure("starred", foreground=C["gold"])
         self.tree.tag_configure("bad", foreground=C["red"])
-        self.tree.pack(fill="both", expand=True, pady=(10, 6), **pad)
+        self.tree.tag_configure("stripe", background=C["stripe"])
+        scroll = ttk.Scrollbar(listing, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda e: self._act(self.toggle_play)())
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._update_verdict())
 
-        tk.Label(root, text=HELP, bg=C["bg"], fg=C["dim"], font=("Segoe UI", 9)).pack(**pad)
 
-        # Device status
-        foot = tk.Frame(root, bg=C["bg"])
-        foot.pack(fill="x", pady=(4, 10), **pad)
-        self.device_label = tk.Label(foot, text="", bg=C["bg"], fg=C["dim"], anchor="w",
-                                     justify="left", font=("Segoe UI", 9))
-        self.device_label.pack(side="left", fill="x", expand=True)
-        ttk.Button(foot, text="Reconnect", takefocus=0,
-                   command=self._act(lambda: self.connect(refresh=True))).pack(side="right")
-
-    def _build_meter(self):
-        cv = self.meter
-        self.bars = []
-        for ch in range(engine.METER_CHANNELS):
-            y0 = ch * BAR_H + 2
-            y1 = y0 + BAR_H - 6
-            cv.create_rectangle(0, y0, METER_W, y1, fill=C["panel"], width=0)
-            cv.create_rectangle(db_to_x(-18), y0, db_to_x(-6), y1, fill=C["target"], width=0)
-            level = cv.create_rectangle(0, y0, 0, y1, fill=C["green"], width=0)
-            hold = cv.create_line(0, y0, 0, y1, fill=C["fg"], width=2)
-            name = cv.create_text(METER_W + 10, (y0 + y1) / 2, anchor="w", fill=C["dim"],
-                                  font=("Segoe UI", 10, "bold"), text=f"IN {ch + 1}")
-            value = cv.create_text(METER_W + 125, (y0 + y1) / 2, anchor="e", fill=C["fg"],
-                                   font=("Consolas", 11), text="-inf")
-            self.bars.append((level, hold, name, value, y0, y1))
-        y = engine.METER_CHANNELS * BAR_H + 4
-        for db in (-48, -36, -24, -18, -12, -6, -3, 0):
-            x = db_to_x(db)
-            cv.create_line(x, y - 4, x, y, fill=C["dim"])
-            cv.create_text(x, y + 2, anchor="n", fill=C["dim"], font=("Segoe UI", 8), text=str(db))
+    def px(self, n):
+        """A layout size in 96-dpi pixels, scaled for this screen."""
+        return int(round(n * self.scale))
 
     def _act(self, fn):
         """Wrap a button/hotkey action so it does nothing while calibrating."""
@@ -596,20 +557,24 @@ class App:
     def _update_device_label(self):
         b = self.engine.backend
         if self.engine.input_paused:
+            self.device_dot.config(fg=C["yellow"])
             self.device_label.config(
                 text="Input paused during playback: the 26c can't run input and output at "
                      "different rates.\nSet Hz to auto to avoid this.", fg=C["yellow"])
             return
         if b is None:
+            self.device_dot.config(fg=C["red"])
             self.device_label.config(text=self.engine.error or "No interface", fg=C["red"])
             return
         quality = ("bit-perfect" if b.bit_perfect
                    else "NOT bit-perfect -- Windows is processing the signal")
         auto = " (auto)" if self.engine.requested_rate == "auto" else ""
+        self.device_dot.config(fg=C["green"] if b.bit_perfect else C["yellow"])
         self.device_label.config(
-            text=f"{b.describe()}  |  {self.engine.samplerate} Hz{auto} / 24-bit WAV  |  {quality}\n"
-                 f"Headphones: {self.engine.output_name()}   |   Takes: {self.song.dir}",
-            fg=C["green"] if b.bit_perfect else C["yellow"])
+            text=f"{b.describe()}   \u00b7   {self.engine.samplerate} Hz{auto} / 24-bit WAV   "
+                 f"\u00b7   {quality}\n"
+                 f"Headphones: {self.engine.output_name()}   \u00b7   Takes: {self.song.dir}",
+            fg=C["dim"] if b.bit_perfect else C["yellow"])
 
     # ---- song / settings --------------------------------------------------
 
@@ -930,7 +895,7 @@ class App:
         self.rate_box.config(state="disabled" if recording else "readonly")
         for w in self.input_buttons + self.track_widgets:
             w.config(state=state)
-        self.buttons["rec"].config(text="Stop (Space)" if recording else "Record (Space)")
+        self.buttons["rec"].config(text=STOP_TEXT if recording else REC_TEXT)
         self._update_verdict()
 
     def _judge_num(self):
@@ -988,9 +953,15 @@ class App:
             text, fg, state = f"{which} {num:03d}{mark}", C["fg"], "normal"
         else:
             text, fg, state = "No take to judge yet", C["dim"], "disabled"
-        self.verdict_label.config(text=text, fg=fg)
-        for b, color in zip(self.verdict_buttons, (C["red"], C["green"])):
-            b.config(state=state, bg=color if state == "normal" else C["panel"])
+        self._verdict_live = fg != C["dim"]
+        self.verdict_label.config(text=text)
+        self._paint_verdict()
+        for b, color, hover in self.verdict_buttons:
+            b.config(state=state)
+            if state == "normal":
+                b.recolor(color, C["ink"], hover)
+            else:
+                b.recolor(C["panel"], C["grey"])
 
     def _trash_num(self, num):
         active = self._active_audition()
@@ -1019,12 +990,13 @@ class App:
         keep = select if select is not None else (
             int(self.tree.selection()[0]) if self.tree.selection() else None)
         self.tree.delete(*self.tree.get_children())
+        row = 0
         for t in reversed(self.song.takes()):
             if t.trashed and not self.show_trash.get():
                 continue
             notes = []
             if t.starred:
-                notes.append("* KEEPER")
+                notes.append("\u2605 KEEPER")
             if t.track:
                 notes.append(f"over track from {fmt_clock(t.track_start)}")
             if t.clipped:
@@ -1040,8 +1012,14 @@ class App:
             tag = "trashed" if t.trashed else "bad" if (t.clipped or t.dropouts or t.unaligned) \
                 else "starred" if t.starred else ""
             peak = f"{t.peak_db:.1f}" if t.peak_db > -199 else "--"
-            self.tree.insert("", "end", iid=str(t.num), tags=(tag,),
+            tags = (tag, "stripe") if row % 2 else (tag,)
+            row += 1
+            self.tree.insert("", "end", iid=str(t.num), tags=tags,
                              values=(t.label, fmt_time(t.seconds), peak, "   ".join(notes)))
+        live = [t for t in self.song.takes() if not t.trashed]
+        keepers = sum(t.starred for t in live)
+        self.takes_title.config(text=f"TAKES   {len(live)}" +
+                                (f"   \u00b7   \u2605 {keepers}" if keepers else ""))
         if keep is not None and self.tree.exists(str(keep)):
             self.tree.selection_set(str(keep))
             self.tree.see(str(keep))
@@ -1203,7 +1181,7 @@ class App:
 
     def reset_clip(self):
         self.clipped = False
-        self.clip_label.config(bg=C["panel"], fg=C["dim"])
+        self.meter.set_clip(False)
 
     def flash(self, text):
         print(f"[flash] {text}")
@@ -1250,7 +1228,7 @@ class App:
         self._poll_work_results()
         peaks = self.engine.take_peaks()
         selected = INPUT_CHOICES[self.input_var.get()]
-        for ch, (level, hold, name, value, y0, y1) in enumerate(self.bars):
+        for ch in range(engine.METER_CHANNELS):
             active = ch < self.engine.input_count
             db = engine.to_dbfs(peaks[ch]) if active else METER_MIN_DB
             self.display_db[ch] = max(db, self.display_db[ch] - DECAY_DB_PER_S * dt)
@@ -1258,18 +1236,10 @@ class App:
             if db >= self.hold_db[ch] or self.hold_age[ch] > HOLD_S:
                 self.hold_db[ch] = db
                 self.hold_age[ch] = 0.0
-            shown = self.display_db[ch]
-            color = C["red"] if shown > -1 else C["yellow"] if shown > -6 else C["green"]
-            self.meter.coords(level, 0, y0, db_to_x(shown), y1)
-            self.meter.itemconfig(level, fill=color)
-            hx = db_to_x(self.hold_db[ch])
-            self.meter.coords(hold, hx, y0, hx, y1)
-            self.meter.itemconfig(name, fill=C["fg"] if ch in selected else C["dim"])
-            self.meter.itemconfig(value, text=f"{self.hold_db[ch]:6.1f}"
-                                  if self.hold_db[ch] > METER_MIN_DB else "-inf")
+            self.meter.show(ch, self.display_db[ch], self.hold_db[ch], ch in selected)
             if active and peaks[ch] >= engine.CLIP_LEVEL and not self.clipped:
                 self.clipped = True
-                self.clip_label.config(bg=C["red"], fg="white")
+                self.meter.set_clip(True)
 
         if self.engine.lost:
             if self.calibration is not None:
@@ -1301,43 +1271,77 @@ class App:
             self.stop_playback()
 
         flash = self._flash
+        status = self._status_for(track, player, flash)
+        if flash and flash[1] > 0 and status[1] == "flash":
+            self._flash = (flash[0], flash[1] - dt)
+        self._show_status(*status)
+        self._update_play_button()
+
+    STATUS_TONES = {  # tone: (background, text)
+        "idle": (C["panel"], C["fg"]), "rec": (C["red"], "white"),
+        "count": (C["yellow"], C["ink"]), "busy": (C["yellow"], C["ink"]),
+        "play": (C["blue"], C["ink"]), "flash": (C["panel"], C["gold"]),
+        "error": (C["panel"], C["red"]),
+    }
+
+    def _status_for(self, track, player, flash):
+        """(text, tone, progress 0..1 or None) for the big status line."""
+        dot = "\u25cf"
         if self.calibration is not None:
-            self.status.config(text="CALIBRATING   keep the ear cup on the mic",
-                               bg=C["yellow"], fg="#0d1117")
-        elif self.engine.recording and track is not None:
+            return "CALIBRATING  \u00b7  keep the ear cup on the mic", "busy", None
+        if self.engine.recording and track is not None:
             start_at = self.song.config["start_at"]
             if track.seconds < start_at:
-                self.status.config(text=f"REC   take {self.current_num:03d}   "
-                                        f"in {start_at - track.seconds:.1f}",
-                                   bg=C["yellow"], fg="#0d1117")
-            else:
-                self.status.config(text=f"REC   take {self.current_num:03d}   "
-                                        f"@ {fmt_time(track.seconds)}",
-                                   bg=C["red"], fg="white")
-        elif self.engine.recording:
-            self.status.config(text=f"REC   take {self.current_num:03d}   "
-                                    f"{fmt_time(self.engine.take_seconds())}",
-                               bg=C["red"], fg="white")
-        elif self._polishing is not None:
+                cue = self.current_cue
+                lead = start_at - cue.play_from if cue is not None else 0.0
+                done = 1 - (start_at - track.seconds) / lead if lead > 0 else None
+                return (f"{dot} REC  take {self.current_num:03d}   "
+                        f"in {start_at - track.seconds:.1f}", "count", done)
+            length = len(self.track_data[0]) / self.track_data[1] if self.track_data else 0
+            return (f"{dot} REC  take {self.current_num:03d}   @ {fmt_time(track.seconds)}",
+                    "rec", track.seconds / length if length else None)
+        if self.engine.recording:
+            return (f"{dot} REC  take {self.current_num:03d}   "
+                    f"{fmt_time(self.engine.take_seconds())}", "rec", None)
+        if self._polishing is not None:
             job = self._polishing
-            self.status.config(text=f"POLISHING {job['mode'].upper()}   "
-                                    f"take {job['take'].num:03d}...",
-                               bg=C["yellow"], fg="#0d1117")
-        elif self._estimating_key is not None:
-            self.status.config(text="ANALYZING TRACK KEY...",
-                               bg=C["yellow"], fg="#0d1117")
-        elif self.playing_num is not None and player is not None:
-            self.status.config(text=f"PLAY {self.playing_mode.upper()}   "
-                                    f"take {self.playing_num:03d}   "
-                                    f"{fmt_time(player.seconds)} / {fmt_time(player.length)}",
-                               bg=C["blue"], fg="#0d1117")
-        elif flash and flash[1] > 0:
-            self.status.config(text=flash[0], bg=C["panel"], fg=C["gold"])
-            self._flash = (flash[0], flash[1] - dt)
-        elif self.engine.backend is None:
-            self.status.config(text="NO INTERFACE", bg=C["panel"], fg=C["red"])
-        else:
-            self.status.config(text="READY   Space to record", bg=C["panel"], fg=C["fg"])
+            return (f"POLISHING {job['mode'].upper()}  \u00b7  take {job['take'].num:03d}...",
+                    "busy", None)
+        if self._estimating_key is not None:
+            return "ANALYZING TRACK KEY...", "busy", None
+        if self.playing_num is not None and player is not None:
+            mode = "" if self.playing_mode == "off" else f" {self.playing_mode.upper()}"
+            return (f"\u25b6 PLAY{mode}  take {self.playing_num:03d}   "
+                    f"{fmt_time(player.seconds)} / {fmt_time(player.length)}", "play",
+                    player.seconds / player.length if player.length else None)
+        if flash and flash[1] > 0:
+            return flash[0], "flash", None
+        if self.engine.backend is None:
+            return "NO INTERFACE", "error", None
+        return "READY  \u00b7  Space to record", "idle", None
+
+    def _show_status(self, text, tone, progress):
+        bg, fg = self.STATUS_TONES[tone]
+        if self._status_shown != (text, tone):
+            self._status_shown = (text, tone)
+            self.status.config(text=text, bg=bg, fg=fg)
+            self.status.master.config(bg=bg)
+            self._paint_verdict()
+        bar = {"rec": "white", "count": C["ink"], "play": C["ink"]}.get(tone)
+        self.progress.show(progress, color=bar, track=bg if progress is not None else None)
+
+    def _paint_verdict(self):
+        tone = self._status_shown[1] if self._status_shown else "idle"
+        bg, fg = self.STATUS_TONES[tone]
+        if tone in ("idle", "flash", "error"):
+            fg = C["fg"] if self._verdict_live else C["dim"]
+        self.verdict_label.config(bg=bg, fg=fg)
+
+    def _update_play_button(self):
+        playing = self._active_audition() is not None
+        text = STOP_PLAY_TEXT if playing else PLAY_TEXT
+        if self.buttons["play"].cget("text") != text:
+            self.buttons["play"].config(text=text)
 
     def on_close(self):
         self._closing = True
