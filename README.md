@@ -2,7 +2,7 @@
 
 > **At home: Pitch and Tone now use your plugins.** After pulling, start the
 > app as usual: Pitch uses Auto-Tune Access (then EFX+, MAutoPitch, Graillon)
-> and Tone Lots adds ValhallaRoom, whichever is installed. The line under the
+> and Tone Lots adds MCharmVerb, whichever is installed. The line under the
 > status band says which one you are hearing; Settings > PLUGINS picks another
 > or Built-in. To check them all against a test voice, run
 > `probe-plugins.bat --engines` (a minute or two) and share the new report the
@@ -175,7 +175,7 @@ it takes over:
 | Stage | Plugins, in the order Auto picks them | Some | Lots |
 |-------|---------------------------------------|------|------|
 | Pitch | Auto-Tune Access, Auto-Tune EFX+, MAutoPitch, Graillon 2 | slower retune, humanize | fastest retune |
-| Room (Tone Lots) | ValhallaRoom, ValhallaVintageVerb, MCharmVerb | -- | a short, quiet room |
+| Room (Tone Lots) | MCharmVerb, ValhallaRoom, ValhallaVintageVerb | -- | a short, quiet room |
 
 Tone's rumble cut, presence lift and compression stay built-in. Settings >
 PLUGINS chooses Auto, Built-in or a specific plugin for each stage. Plugins run
@@ -219,7 +219,7 @@ song opens.
 | `playback`        | `"headphones"`                | Play on: `headphones`, `speakers`, or `both` |
 | `speakers`        | `""` (best guess)             | Output name used for speakers              |
 | `pitch_engine`    | `"auto"`                      | Pitch plugin: `auto`, `builtin`, or an id from `plugins.py` (`auto-tune-access`, `auto-tune-efx`, `mautopitch`, `graillon`) |
-| `room_engine`     | `"auto"`                      | Room for Tone Lots: `auto`, `builtin`, `valhalla-room`, `valhalla-vintageverb`, `mcharmverb` |
+| `room_engine`     | `"auto"`                      | Room for Tone Lots: `auto`, `builtin`, `mcharmverb`, `valhalla-room`, `valhalla-vintageverb` |
 
 Per-song track settings (track file, start point, count-in and vocal key) live
 in `takes/<song>/song.json`; per-take details live in

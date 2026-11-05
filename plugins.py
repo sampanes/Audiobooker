@@ -79,6 +79,11 @@ ENGINES = {e.id: e for e in (
            {"some": {"correction": 70.0, "pitch_smoothing_ms": 25.0, "inertia": 30.0},
             "lots": {"correction": 100.0, "pitch_smoothing_ms": 1.0, "inertia": 0.0}}),
     # Room (replaces the built-in echo in Tone "Lots"), in auto-pick order.
+    # MCharmVerb first: the 11-03 probe rendered it in 0.8 s, against 11-19 s
+    # for the Valhallas, and a light room on a voice gains little from them.
+    Engine("mcharmverb", "MCharmVerb", "room", "mcharmverb",
+           {"lots": {"dry_wet_globals": 12.0, "length_globals": 1000.0,
+                     "predelay_globals": 10.0}}),
     Engine("valhalla-room", "ValhallaRoom", "room", "valhallaroom",
            {"lots": {"type": "Medium Room", "mix": 14.0, "predelay": 12.0, "decay": 1.0,
                      "hicut": 7000.0, "locut": 120.0}}),
@@ -86,9 +91,6 @@ ENGINES = {e.id: e for e in (
            {"lots": {"reverbmode": "Room", "colormode": "now", "mix": 12.0,
                      "predelay": 10.0, "decay": 1.0, "highcut": 7000.0,
                      "lowcut": 120.0}}),
-    Engine("mcharmverb", "MCharmVerb", "room", "mcharmverb",
-           {"lots": {"dry_wet_globals": 12.0, "length_globals": 1000.0,
-                     "predelay_globals": 10.0}}),
     # Test engines built from pedalboard's own effects (no VST3 needed).
     Engine("test-shift", "test: up 1 semitone", "pitch", "", {"semitones": 1.0}, True),
     Engine("test-crash", "test: crash", "pitch", "", {}, True),

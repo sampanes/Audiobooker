@@ -57,6 +57,10 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(plugins.resolve("room", "auto", self.installed), "valhalla-room")
         self.assertIsNone(plugins.resolve("pitch", "auto", {}))
 
+    def test_auto_room_prefers_the_fast_mcharmverb(self):
+        installed = {"valhalla-room": "v", "valhalla-vintageverb": "vv", "mcharmverb": "m"}
+        self.assertEqual(plugins.resolve("room", "auto", installed), "mcharmverb")
+
     def test_builtin_and_explicit_choices(self):
         self.assertIsNone(plugins.resolve("pitch", "builtin", self.installed))
         self.assertEqual(plugins.resolve("pitch", "mautopitch", self.installed), "mautopitch")
