@@ -185,6 +185,10 @@ line under the status band says so, and that plugin is skipped until you pick
 it again in Settings. The knob settings per plugin are starting points in
 `plugins.py`; changing them (and `RECIPE_VERSION`) re-renders cached takes.
 
+Recording a sample to build an AI voice model? See
+[docs/voice-sample-settings.md](docs/voice-sample-settings.md) for which
+settings to export with and why (short version: Pitch Some, Tone None).
+
 The Key control limits pitch correction to a major or minor scale. Loading a
 backing track estimates its key once; uncertain estimates fall back to
 Chromatic. You can override the estimate at any time. Dry songs default to
