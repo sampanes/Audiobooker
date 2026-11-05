@@ -26,7 +26,8 @@ captures possible improvements, not promises or supported integrations.
   processing time. Any network-based service would require a separate, explicit
   product and privacy decision.
 - Improve key detection and let listeners make corrections when an estimate is
-  uncertain.
+  uncertain. Planned: per-phrase key from the track section under each take,
+  plus phrase looping -- see [docs/milestone-phrase-key.md](docs/milestone-phrase-key.md).
 - Consider an export action for processed audio and more flexible comparisons
   between versions.
 
