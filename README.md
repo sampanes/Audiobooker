@@ -74,6 +74,17 @@ The bar at the top of the window says where your keystrokes go: green **KEYS ON*
 means they control the recorder, yellow means you are typing in a text box, and
 when another window has the keyboard the recorder fades out.
 
+The line over the take list counts the takes, the starred ones, and how much
+singing you are keeping ("2:41 kept"). Keepers are the starred takes, or, if
+nothing is starred yet, every take not in the trash.
+
+**Export** (next to Folder) joins the keepers, oldest first, into one 24-bit WAV
+with a second of silence between takes, as they sound with the current Pitch and
+Tone: `takes/<song>/export/<song> - keepers (raw).wav`, or `(pitch some tone
+none)` and so on. Silence before the singing on backing-track takes is left
+out. Exporting again with the same settings replaces that file. When it is done,
+Explorer opens on the export folder with the file selected.
+
 Raw recordings are never deleted: trashed takes move to `takes/<song>/trash/`.
 Take numbers are never reused, so `take_007.wav` always means the same take.
 Generated pitch/tone cache files are disposable and may be pruned or regenerated.

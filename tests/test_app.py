@@ -336,5 +336,31 @@ class SpeakerGuessTest(unittest.TestCase):
         self.assertEqual(recorder_app.guess_speakers([]), "")
 
 
+class ExplorerTest(unittest.TestCase):
+    def test_select_switch_stays_outside_the_quoted_path(self):
+        cmd = recorder_app.explorer_select_command(r"C:\songs\my song\export\a b.wav")
+        self.assertEqual(cmd, r'explorer /select,"C:\songs\my song\export\a b.wav"')
+
+
+class TakesHeaderTest(unittest.TestCase):
+    @staticmethod
+    def take(num, seconds, starred=False, trashed=False):
+        return SimpleNamespace(num=num, seconds=seconds, starred=starred, trashed=trashed)
+
+    def test_no_takes_shows_only_the_count(self):
+        self.assertEqual(recorder_app.takes_header([self.take(1, 9.0, trashed=True)]),
+                         "TAKES   0")
+
+    def test_nothing_starred_counts_every_live_take_as_kept(self):
+        takes = [self.take(1, 30.0), self.take(2, 12.0, trashed=True), self.take(3, 14.4)]
+        self.assertEqual(recorder_app.takes_header(takes), "TAKES   2   \u00b7   0:44 kept")
+
+    def test_kept_time_adds_up_starred_live_takes_only(self):
+        takes = [self.take(1, 95.0, starred=True), self.take(2, 40.0),
+                 self.take(3, 66.4, starred=True), self.take(4, 500.0, starred=True, trashed=True)]
+        self.assertEqual(recorder_app.takes_header(takes),
+                         "TAKES   3   \u00b7   \u2605 2   \u00b7   2:41 kept")
+
+
 if __name__ == "__main__":
     unittest.main()

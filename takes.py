@@ -31,6 +31,8 @@ UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9 _.'()-]+")
 RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 TRACK_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg", ".aif", ".aiff")
 SONG_DEFAULTS = {"track": "", "start_at": 0.0, "leadin": 2.0, "use_track": True}
+EXPORT_GAP_SECONDS = 1.0
+EXPORT_MIN_LEAD_SECONDS = 0.05  # less leading silence than this is rounding, not a track offset
 _POLISH_LOCKS = {}
 _POLISH_LOCKS_GUARD = threading.Lock()
 
@@ -555,3 +557,59 @@ class Song:
             return None
         path = self.dir / name
         return path if path.is_file() else None
+
+    def export_path(self, description):
+        """Where the joined keepers go, e.g. '<song> - keepers (raw).wav' in export/."""
+        name = safe_name(f"{self.name} - keepers ({description})")
+        return self.dir / "export" / f"{name}.wav"
+
+
+def keepers(takes):
+    """Takes worth keeping, oldest first: the starred ones, or, when nothing is
+    starred, every take that isn't in the trash."""
+    live = sorted((t for t in takes if not t.trashed), key=lambda t: t.num)
+    return [t for t in live if t.starred] or live
+
+
+def join_takes(sources, out_path, gap_seconds=EXPORT_GAP_SECONDS):
+    """Write takes end to end into one 24-bit WAV and return its length in seconds.
+
+    sources is [(wav path, sung seconds)]. Silence a take carries before the singing
+    (takes over a backing track sit on the track's timeline) is left out, mono takes
+    are copied to both sides when others are stereo, and gap_seconds of silence
+    separates takes. Raises ValueError if the takes have different sample rates.
+    """
+    if not sources:
+        raise ValueError("no takes to export")
+    infos = [sf.info(str(path)) for path, _ in sources]
+    rates = {info.samplerate for info in infos}
+    if len(rates) != 1:
+        raise ValueError("these takes were recorded at different sample rates "
+                         f"({', '.join(str(r) for r in sorted(rates))} Hz)")
+    rate = rates.pop()
+    channels = max(info.channels for info in infos)
+    gap = np.zeros((int(round(gap_seconds * rate)), channels), dtype=np.float32)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_name(f".{out_path.stem}.tmp.wav")
+    total = 0
+    try:
+        with sf.SoundFile(str(tmp), "w", samplerate=rate, channels=channels,
+                          subtype="PCM_24") as out:
+            for i, ((path, sung_seconds), info) in enumerate(zip(sources, infos)):
+                lead = info.frames - int(round(sung_seconds * rate))
+                if lead < int(EXPORT_MIN_LEAD_SECONDS * rate):
+                    lead = 0  # a dry take: nothing before the singing
+                data, _ = sf.read(str(path), dtype="float32", always_2d=True, start=lead)
+                if data.shape[1] < channels:
+                    data = np.repeat(data[:, :1], channels, axis=1)
+                if i:
+                    out.write(gap)
+                    total += len(gap)
+                out.write(data)
+                total += len(data)
+        os.replace(tmp, out_path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return total / rate

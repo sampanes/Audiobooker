@@ -5,6 +5,7 @@ import ctypes
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -20,6 +21,7 @@ import engine
 import plugins
 import polish
 import ui
+import takes
 from takes import TRACK_EXTENSIONS, Song
 
 HERE = Path(__file__).resolve().parent
@@ -111,6 +113,37 @@ def fmt_clock(seconds):
     return f"{m}:{s:02d}"
 
 
+def explorer_select_command(path):
+    """Command line that opens Explorer on path's folder with path selected.
+
+    Explorer parses its own command line: /select, must be outside the quotes, or a
+    path with spaces opens Documents instead."""
+    return f'explorer /select,"{Path(path)}"'
+
+
+def reveal_in_explorer(path):
+    try:
+        subprocess.Popen(explorer_select_command(path))
+    except OSError:
+        try:
+            os.startfile(Path(path).parent)
+        except OSError:
+            pass
+
+
+def takes_header(all_takes):
+    """Header over the take list: live takes, starred takes and the keepers' sung time."""
+    live = [t for t in all_takes if not t.trashed]
+    starred = sum(t.starred for t in live)
+    text = f"TAKES   {len(live)}"
+    if starred:
+        text += f"   \u00b7   \u2605 {starred}"
+    kept = takes.keepers(all_takes)
+    if kept:
+        text += f"   \u00b7   {fmt_clock(sum(t.seconds for t in kept))} kept"
+    return text
+
+
 def parse_clock(text):
     """'1:05', '1:05.5' or '65' -> seconds. Raises ValueError."""
     parts = text.strip().split(":")
@@ -148,6 +181,7 @@ class App:
         self._play_request_id = 0
         self._pending_play = None
         self._polishing = None
+        self._exporting = None
         self._key_request_id = 0
         self._estimating_key = None
         self._closing = False
@@ -202,6 +236,8 @@ class App:
         self.song_entry.bind("<Escape>", self.on_song_escape)
         ttk.Button(top, text="Folder", style="Small.TButton", takefocus=0,
                    command=self.open_folder).pack(side="left", padx=(px(6), 0))
+        ttk.Button(top, text="Export", style="Small.TButton", takefocus=0,
+                   command=self._act(self.export_keepers)).pack(side="left", padx=(px(6), 0))
         ttk.Button(top, text="\u2699  Settings", style="Small.TButton", takefocus=0,
                    command=self.open_settings).pack(side="right")
         self.device_short = ui.label(top, "", size=9, cursor="hand2")
@@ -537,6 +573,8 @@ class App:
                             cancel=lambda: not self._key_job_current(job))
                     else:
                         result = None
+                elif job["kind"] == "export":
+                    result = self._export(job)
                 elif job["kind"] == "prune":
                     result = job["song"].prune_polished()
                 else:
@@ -547,11 +585,12 @@ class App:
             self._work_results.put((job, result, error))
             del job, result, error
 
-    def _render_take(self, job):
+    def _render_take(self, job, current=None):
         """Render and cache a take (worker thread). Plugins fall back to built-in."""
         song, take, mode = job["song"], job["take"], job["mode"]
         recipe = job["recipe"]
-        current = lambda: self._render_job_current(job)  # noqa: E731
+        if current is None:
+            current = lambda: self._render_job_current(job)  # noqa: E731
         source_stamp = song.polish_source_stamp(take)
         source, rate = sf.read(str(take.path), dtype="float32", always_2d=True)
         data = None
@@ -573,6 +612,29 @@ class App:
         return song.publish_polished(take, mode, recipe, data, rate,
                                      expected_source=source_stamp)
 
+    def _export(self, job):
+        """Join the keepers into one WAV (worker thread), polishing any not yet cached.
+
+        Returns the export's length in seconds, or None if the app is closing."""
+        current = lambda: not self._closing and not job["cancel"].is_set()  # noqa: E731
+        sources = []
+        for take in job["takes"]:
+            path = take.path
+            if job["mode"] != "off":
+                path = job["song"].cached_polished(take, job["mode"], job["recipe"])
+                if path is None and current():
+                    one = dict(job, take=take)
+                    path = self._render_take(one, current)
+                    if one.get("fallback"):  # use built-in for the rest of the export
+                        job["fallbacks"].append(one["fallback"])
+                        job["engines"] = {}
+                        job["recipe"] = polish.recipe_hash(job["mode"], job["key"])
+            if not current() or path is None:
+                return None
+            sources.append((path, take.seconds))
+            job["done"] += 1
+        return takes.join_takes(sources, job["out"])
+
     def _poll_work_results(self):
         while True:
             try:
@@ -583,6 +645,8 @@ class App:
                 self._finish_render(job, result, error)
             elif job["kind"] == "key":
                 self._finish_key_estimate(job, result, error)
+            elif job["kind"] == "export":
+                self._finish_export(job, result, error)
             elif error is not None and not self._closing:
                 print(f"[{PROCESS_TITLE}] could not prune polished cache: {error}")
 
@@ -1025,6 +1089,52 @@ class App:
     def open_folder(self):
         os.startfile(self.song.dir)
 
+    def export_keepers(self):
+        """Join the keepers (starred takes, else every take not trashed) into one WAV,
+        as they sound with the current Pitch and Tone, in the song's export folder."""
+        if self.engine.recording or self._exporting is not None:
+            return
+        chosen = takes.keepers(self.song.takes())
+        if not chosen:
+            self.flash("Nothing to export yet -- record a take first")
+            return
+        try:
+            mode = polish.normalize_mode(self.polish_var.get())
+            key = polish.parse_key(self._song_key_name())
+            engines = self._engines_for(mode) if mode != "off" else {}
+            recipe = polish.recipe_hash(mode, key, plugins.recipe(engines)) \
+                if mode != "off" else None
+        except Exception as exc:
+            messagebox.showerror("Take Recorder", f"Could not prepare the export:\n{exc}")
+            return
+        out = self.song.export_path(polish.describe_mode(mode))
+        job = {"kind": "export", "song": self.song, "takes": chosen, "mode": mode,
+               "key": key, "recipe": recipe, "engines": engines,
+               "plugins": dict(self.plugins_found), "out": out, "done": 0,
+               "fallbacks": [], "cancel": threading.Event()}
+        self._exporting = job
+        self._work_queue.put(job)
+
+    def _finish_export(self, job, seconds, error):
+        self._exporting = None
+        if self._closing:
+            return
+        for engine_id, why in job["fallbacks"]:
+            print(f"[{PROCESS_TITLE}] plugin fell back to built-in: {why}")
+            self._failed_engines[engine_id] = why
+        if job["fallbacks"]:
+            self._refresh_engine_boxes()
+        if error is not None:
+            messagebox.showerror("Take Recorder", f"Could not export:\n{error}")
+            return
+        if seconds is None:
+            return
+        out = job["out"]
+        count = len(job["takes"])
+        self.flash(f"Exported {count} take{'s' if count != 1 else ''} "
+                   f"({fmt_clock(seconds)}) to export\\{out.name}")
+        reveal_in_explorer(out)
+
     # ---- takes -------------------------------------------------------------
 
     def target_take(self):
@@ -1223,10 +1333,7 @@ class App:
             row += 1
             self.tree.insert("", "end", iid=str(t.num), tags=tags,
                              values=(t.label, fmt_time(t.seconds), peak, "   ".join(notes)))
-        live = [t for t in self.song.takes() if not t.trashed]
-        keepers = sum(t.starred for t in live)
-        self.takes_title.config(text=f"TAKES   {len(live)}" +
-                                (f"   \u00b7   \u2605 {keepers}" if keepers else ""))
+        self.takes_title.config(text=takes_header(self.song.takes()))
         if keep is not None and self.tree.exists(str(keep)):
             self.tree.selection_set(str(keep))
             self.tree.see(str(keep))
@@ -1517,6 +1624,11 @@ class App:
         if self._polishing is not None:
             job = self._polishing
             return f"POLISHING  take {job['take'].num:03d}...", "busy", None
+        if self._exporting is not None:
+            job = self._exporting
+            total = len(job["takes"])
+            return (f"EXPORTING  {min(job['done'] + 1, total)} of {total}...", "busy",
+                    job["done"] / total)
         if self._estimating_key is not None:
             return "ANALYZING TRACK KEY...", "busy", None
         if self.playing_num is not None and player is not None:
@@ -1572,6 +1684,8 @@ class App:
         self._closing = True
         if self._pending_play is not None:
             self._pending_play["cancel"].set()
+        if self._exporting is not None:
+            self._exporting["cancel"].set()
         self._play_request_id += 1
         self._pending_play = None
         self._polishing = None

@@ -7,6 +7,7 @@ from unittest import mock
 import numpy as np
 import soundfile as sf
 
+import takes
 from takes import Song, safe_name
 
 
@@ -245,6 +246,62 @@ class PolishedCacheTest(unittest.TestCase):
         self.assertEqual(self.song.prune_polished(), [render])
         self.assertFalse(render.exists())
         self.assertTrue(unknown.exists())
+
+
+class ExportTest(unittest.TestCase):
+    RATE = 1000
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.song = Song(self.root, "demo")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def add_take(self, data, sung_seconds, starred=False):
+        num, path = self.song.next_path()
+        sf.write(path, data, self.RATE, subtype="PCM_24")
+        self.song.record(num, sung_seconds, -6.0, False, 0)
+        if starred:
+            self.song.set_star(num, True)
+        return num
+
+    def test_keepers_are_starred_takes_else_every_live_take(self):
+        one = self.add_take(np.zeros(10), 0.01)
+        two = self.add_take(np.zeros(10), 0.01)
+        three = self.add_take(np.zeros(10), 0.01)
+        self.song.trash(two)
+        self.assertEqual([t.num for t in takes.keepers(self.song.takes())], [one, three])
+        self.song.set_star(three, True)
+        self.assertEqual([t.num for t in takes.keepers(self.song.takes())], [three])
+
+    def test_join_skips_track_silence_upmixes_mono_and_adds_gaps(self):
+        dry = np.full(200, 0.25)  # mono, sung from the first sample
+        on_track = np.zeros((500, 2))  # 300 frames of timeline silence, then singing
+        on_track[300:] = 0.5
+        a = self.add_take(dry, 0.2)
+        b = self.add_take(on_track, 0.2)
+        out = self.song.export_path("raw")
+        sources = [(self.song.get(n).path, self.song.get(n).seconds) for n in (a, b)]
+        seconds = takes.join_takes(sources, out, gap_seconds=0.1)
+        data, rate = sf.read(out, always_2d=True)
+        self.assertEqual(out.name, "demo - keepers (raw).wav")
+        self.assertEqual((rate, data.shape), (self.RATE, (500, 2)))
+        self.assertAlmostEqual(seconds, 0.5)
+        np.testing.assert_allclose(data[:200], 0.25, atol=1e-6)
+        np.testing.assert_allclose(data[200:300], 0.0, atol=1e-6)
+        np.testing.assert_allclose(data[300:], 0.5, atol=1e-6)
+        self.assertEqual([p.name for p in out.parent.iterdir()], [out.name])  # no temp left
+
+    def test_join_refuses_mixed_sample_rates(self):
+        first = self.root / "a.wav"
+        second = self.root / "b.wav"
+        sf.write(first, np.zeros(100), 1000)
+        sf.write(second, np.zeros(100), 2000)
+        with self.assertRaises(ValueError):
+            takes.join_takes([(first, 0.1), (second, 0.05)], self.root / "out.wav")
+        self.assertFalse((self.root / "out.wav").exists())
 
 
 if __name__ == "__main__":
