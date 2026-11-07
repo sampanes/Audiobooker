@@ -1,3 +1,4 @@
+import json
 import queue
 import tempfile
 import threading
@@ -340,6 +341,17 @@ class ExplorerTest(unittest.TestCase):
     def test_select_switch_stays_outside_the_quoted_path(self):
         cmd = recorder_app.explorer_select_command(r"C:\songs\my song\export\a b.wav")
         self.assertEqual(cmd, r'explorer /select,"C:\songs\my song\export\a b.wav"')
+
+
+class SaveSettingsTest(unittest.TestCase):
+    def test_settings_are_replaced_whole_and_no_temp_file_is_left(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text('{"song": "old"}', encoding="utf-8")
+            recorder_app.save_settings({"song": "new", "latency_ms": 12.5}, path)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")),
+                             {"song": "new", "latency_ms": 12.5})
+            self.assertEqual([p.name for p in Path(tmp).iterdir()], ["settings.json"])
 
 
 class TakesHeaderTest(unittest.TestCase):

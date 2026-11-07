@@ -1,27 +1,5 @@
 # Take Recorder
 
-> **At home: Pitch and Tone now use your plugins.** After pulling, start the
-> app as usual: Pitch uses Auto-Tune Access (then EFX+, MAutoPitch, Graillon)
-> and Tone Lots adds MCharmVerb, whichever is installed. The line under the
-> status band says which one you are hearing; Settings > PLUGINS picks another
-> or Built-in. To check them all against a test voice, run
-> `probe-plugins.bat --engines` (a minute or two) and share the new report the
-> same way as before.
->
-> **Plugin probe results** are in `plugin-probe/report.7z`, password-protected
-> because the report lists every plugin installed on that PC. Extract with
-> `"C:\Program Files\7-Zip\7z.exe" x plugin-probe\report.7z -oplugin-probe`
-> (it asks for the password).
->
-> To probe again, double-click `probe-plugins.bat` on the PC with the plugins.
-> It checks whether Auto-Tune, Graillon, MAutoPitch, Melda, Valhalla and
-> iZotope plugins work *outside* FL Studio, writes `plugin-probe/report-<date>.md`
-> (git-ignored), and saves what each plugin did to a test voice in
-> `plugin-probe/out/`. To share a new report, encrypt it (names hidden too) and
-> commit only the `.7z`:
-> `cd plugin-probe` then
-> `"C:\Program Files\7-Zip\7z.exe" a -t7z -mhe=on -p report.7z report-<date>.md`
-
 Record yourself singing, keep the good takes, trash the bad ones -- all from the
 keyboard, without stopping to fiddle with a DAW.
 
@@ -40,6 +18,7 @@ installs the pinned dependencies; after that it just launches.
 | `start.bat`  | Starts the app. Running it again replaces the old copy.             |
 | `stop.bat`   | Closes the app (finishing any take in progress), force-kills if hung. |
 | `status.bat` | Says whether it's running. Exit code 0 = running.                   |
+| `probe-plugins.bat` | Checks which plugins work outside a DAW (see below).         |
 
 The app runs in a minimized console window titled `take-recorder`.
 
@@ -185,6 +164,27 @@ line under the status band says so, and that plugin is skipped until you pick
 it again in Settings. The knob settings per plugin are starting points in
 `plugins.py`; changing them (and `RECIPE_VERSION`) re-renders cached takes.
 
+### Checking the plugins
+
+On the PC with the plugins, double-click `probe-plugins.bat`. It checks whether
+Auto-Tune, Graillon, MAutoPitch, Melda, Valhalla and iZotope plugins work
+*outside* FL Studio, writes `plugin-probe/report-<date>.md` (git-ignored) and
+saves what each plugin did to a test voice in `plugin-probe/out/`.
+`probe-plugins.bat --engines` checks only the recorder's own Pitch and Tone
+engines (a minute or two).
+
+The report lists every plugin installed on that PC, so only a
+password-protected copy is committed, `plugin-probe/report.7z`. To share a new
+report, encrypt it with the names hidden too and commit only the `.7z`:
+
+```
+cd plugin-probe
+"C:\Program Files\7-Zip\7z.exe" a -t7z -mhe=on -p report.7z report-<date>.md
+```
+
+To read it: `"C:\Program Files\7-Zip\7z.exe" x plugin-probe\report.7z -oplugin-probe`
+(it asks for the password).
+
 Recording a sample to build an AI voice model? See
 [docs/voice-sample-settings.md](docs/voice-sample-settings.md) for which
 settings to export with and why (short version: Pitch Some, Tone None).
@@ -233,6 +233,7 @@ engine.py    Input stream, take writer, backing track + alignment, playback
 polish.py    Offline pitch correction, key estimation and vocal polish
 plugins.py   Optional plugin engines (Auto-Tune, Melda, Valhalla...), run in a child process
 takes.py     Song folders, metadata, crash recovery and polished cache
+tools/       probe_plugins.py, behind probe-plugins.bat
 tests/       python -m unittest discover -s tests -t .
 ```
 

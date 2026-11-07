@@ -32,6 +32,10 @@ LIMIT = 10.0 ** (-1.0 / 20.0)
 EQ_BLOCK_SECONDS = 0.25
 EQ_MIN_BLOCK = 4096
 EQ_MAX_BLOCK = 32768
+# How well a track's note profile must correlate with its best key profile:
+# tonal music fits at 0.8 and up, noise and note clusters at 0.6 and below.
+KEY_FIT_FLOOR = 0.5
+KEY_FIT_FULL = 0.8
 
 _SCALE_STEPS = {
     "major": (0, 2, 4, 5, 7, 9, 11),
@@ -141,6 +145,11 @@ def parse_key(value):
     if len(parts) != 2 or parts[0] not in _ROOT_ALIASES or parts[1] not in _SCALE_STEPS:
         raise ValueError(f"unknown key: {value!r}")
     return KeySpec(_ROOT_ALIASES[parts[0]], parts[1])
+
+
+def _key_notes(spec):
+    """The pitch classes (C=0) of a key's scale."""
+    return frozenset((spec.root + step) % 12 for step in _SCALE_STEPS[spec.scale])
 
 
 def snap_midi(midi, key=None):
@@ -647,7 +656,14 @@ def estimate_key(data, rate, cancel=None):
             scores.append((score, KeySpec(root, scale)))
     scores.sort(key=lambda item: item[0], reverse=True)
     best_score, best_key = scores[0]
-    second_score = scores[1][0]
+    # The relative major/minor (C major vs A minor) is usually the runner-up and
+    # uses the same seven notes, so correction targets are identical. Confidence
+    # is the margin over the best key with a different set of notes.
+    best_notes = _key_notes(best_key)
+    second_score = next(score for score, key in scores[1:] if _key_notes(key) != best_notes)
     confidence = float(np.clip((best_score - second_score) /
                                max(abs(best_score), 1e-9), 0.0, 1.0))
-    return best_key.name, confidence
+    # A note profile that fits no key well (noise, a cluster of every note) is not
+    # in a key, however the near-equal scores happen to rank.
+    fit = np.clip((best_score - KEY_FIT_FLOOR) / (KEY_FIT_FULL - KEY_FIT_FLOOR), 0.0, 1.0)
+    return best_key.name, confidence * float(fit)

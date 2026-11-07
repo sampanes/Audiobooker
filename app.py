@@ -99,8 +99,12 @@ def guess_speakers(names):
     return next((n for n in names if plain(n)), names[0] if names else "")
 
 
-def save_settings(settings):
-    SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+def save_settings(settings, path=None):
+    """Write settings.json via a temp file, so a crash mid-write can't empty it."""
+    path = Path(path or SETTINGS_PATH)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def fmt_time(seconds):
@@ -576,7 +580,8 @@ class App:
                 elif job["kind"] == "export":
                     result = self._export(job)
                 elif job["kind"] == "prune":
-                    result = job["song"].prune_polished()
+                    # Same thread as exports, so no export is mid-write right now.
+                    result = job["song"].prune_polished() + job["song"].prune_export_temps()
                 else:
                     raise ValueError(f"Unknown background job {job['kind']!r}")
                 error = None
@@ -1168,6 +1173,7 @@ class App:
         extra = {}
         if cue is not None:
             extra = {"track": self.song.config["track"], "track_start": round(cue.play_from, 3),
+                     "start_at": self.song.config["start_at"],
                      "latency_ms": self.settings.get("latency_ms")}
         self.song.begin(num, **extra)
         self._cancel_key_estimate()
@@ -1315,7 +1321,7 @@ class App:
             if t.starred:
                 notes.append("\u2605 KEEPER")
             if t.track:
-                notes.append(f"over track from {fmt_clock(t.track_start)}")
+                notes.append(f"over track from {fmt_clock(t.sung_from)}")
             if t.clipped:
                 notes.append("CLIPPED")
             if t.dropouts:
@@ -1624,6 +1630,11 @@ class App:
         if self._polishing is not None:
             job = self._polishing
             return f"POLISHING  take {job['take'].num:03d}...", "busy", None
+        # A take you asked to hear wins over background work (export, key estimate).
+        if self.playing_num is not None and player is not None:
+            return (f"\u25ba PLAY  take {self.playing_num:03d}   "
+                    f"{fmt_time(player.seconds)} / {fmt_time(player.length)}", "play",
+                    player.seconds / player.length if player.length else None)
         if self._exporting is not None:
             job = self._exporting
             total = len(job["takes"])
@@ -1631,10 +1642,6 @@ class App:
                     job["done"] / total)
         if self._estimating_key is not None:
             return "ANALYZING TRACK KEY...", "busy", None
-        if self.playing_num is not None and player is not None:
-            return (f"\u25ba PLAY  take {self.playing_num:03d}   "
-                    f"{fmt_time(player.seconds)} / {fmt_time(player.length)}", "play",
-                    player.seconds / player.length if player.length else None)
         if flash and flash[1] > 0:
             return flash[0], "flash", None
         if self.engine.backend is None:

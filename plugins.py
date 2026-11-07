@@ -1,7 +1,7 @@
 """Optional plugin engines for Pitch and Tone playback.
 
 The built-in DSP in polish.py always works. When a supported VST3 plugin is
-installed (Auto-Tune, MAutoPitch, Graillon for pitch; Valhalla or Melda for the
+installed (Auto-Tune, MAutoPitch, Graillon for pitch; Melda or Valhalla for the
 room in Tone "Lots"), a render can use it instead.
 
 Plugins never load inside the recorder's own process: render_isolated() runs

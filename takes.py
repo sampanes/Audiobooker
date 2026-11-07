@@ -23,6 +23,7 @@ POLISHED_TMP_RE = re.compile(
 LEGACY_POLISHED_RE = re.compile(
     r"^\.?take_(\d{3,})\.(gentle|strong)(\.[A-Za-z0-9_-]+\.tmp)?\.wav$")
 POLISH_INDEX_TMP_RE = re.compile(r"^\.index\.[A-Za-z0-9_-]+\.tmp$")
+EXPORT_TMP_RE = re.compile(r"^\..+\.tmp\.wav$")  # join_takes() writes .<name>.tmp.wav
 POLISH_MODES = tuple(f"{p}-{t}" for p in ("none", "some", "lots")
                     for t in ("none", "some", "lots") if (p, t) != ("none", "none"))
 POLISH_INDEX_VERSION = 2
@@ -114,11 +115,17 @@ class Take:
     recovered: bool = False
     unaligned: bool = False
     track: str = ""
-    track_start: float = 0.0
+    track_start: float = 0.0  # track time where playback began (count-in included)
+    start_at: float = None    # track time where singing began; None on older takes
 
     @property
     def label(self):
         return f"{self.num:03d}"
+
+    @property
+    def sung_from(self):
+        """Track time where the singing began (older takes: where the count-in began)."""
+        return self.track_start if self.start_at is None else self.start_at
 
 
 class Song:
@@ -218,7 +225,7 @@ class Song:
             meta = self._meta.get(str(num), {})
             take = Take(num, path, trashed)
             for key in ("starred", "seconds", "peak_db", "clipped", "dropouts", "recovered",
-                        "unaligned", "track", "track_start"):
+                        "unaligned", "track", "track_start", "start_at"):
                 if key in meta:
                     setattr(take, key, meta[key])
             result.append(take)
@@ -561,7 +568,29 @@ class Song:
     def export_path(self, description):
         """Where the joined keepers go, e.g. '<song> - keepers (raw).wav' in export/."""
         name = safe_name(f"{self.name} - keepers ({description})")
-        return self.dir / "export" / f"{name}.wav"
+        return self.export_dir / f"{name}.wav"
+
+    @property
+    def export_dir(self):
+        return self.dir / "export"
+
+    def prune_export_temps(self):
+        """Remove half-written exports left by a crash or by closing mid-export.
+
+        Call only when no export is running (the app runs both on one thread)."""
+        removed = []
+        try:
+            children = list(self.export_dir.iterdir())
+        except OSError:
+            return removed
+        for path in children:
+            if path.is_file() and EXPORT_TMP_RE.match(path.name):
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                removed.append(path)
+        return removed
 
 
 def keepers(takes):

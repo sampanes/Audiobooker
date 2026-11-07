@@ -172,6 +172,30 @@ class KeyEstimateTest(unittest.TestCase):
         self.assertEqual(name, "C major")
         self.assertGreater(confidence, 0.12)
 
+    def test_relative_minor_runner_up_does_not_make_a_key_uncertain(self):
+        # I-V-vi-IV in C with a bass note and harmonics: A minor scores almost as
+        # well as C major, but has the same notes.
+        rate = 44100  # at 16 kHz the old margin happened to clear the bar
+
+        def chord(midis):
+            hz = [440.0 * 2 ** ((m - 69) / 12) * h for m in midis for h in (1, 2, 3)]
+            time = np.arange(rate) / rate
+            weights = [1, 1 / 2, 1 / 3] * len(midis)
+            return sum(w * np.sin(2 * np.pi * f * time) for f, w in zip(hz, weights)
+                       if f < rate / 2) * np.hanning(rate)
+
+        progression = ([48, 52, 55, 60], [55, 59, 62, 67], [57, 60, 64, 69], [53, 57, 60, 65])
+        signal = 0.1 * np.concatenate([chord(c) for _ in range(4) for c in progression])
+        name, confidence = polish.estimate_key(signal.astype(np.float32), rate)
+        self.assertEqual(name, "C major")
+        self.assertGreater(confidence, 0.12)
+
+    def test_every_note_at_once_is_not_a_key(self):
+        notes = [220.0 * 2 ** (k / 12) for k in range(12)]
+        notes += [440.0 * 2 ** (k / 12) for k in range(12)]
+        _, confidence = polish.estimate_key(self.chord(notes, seconds=4.0), self.RATE)
+        self.assertLess(confidence, 0.12)
+
     def test_single_triad_is_treated_as_ambiguous(self):
         signal = self.chord((261.6256, 329.6276, 391.9954), seconds=2.0)
         name, confidence = polish.estimate_key(signal, self.RATE)

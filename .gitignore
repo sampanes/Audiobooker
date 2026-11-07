@@ -4,6 +4,7 @@ __pycache__/
 # Your recordings and local settings stay on this machine
 takes/
 settings.json
+settings.json.tmp
 take-recorder.pid
 take-recorder.log
 

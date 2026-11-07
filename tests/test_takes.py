@@ -68,6 +68,20 @@ class SongTest(unittest.TestCase):
         self.assertEqual(take.seconds, 1.5)
         self.assertEqual(take.peak_db, -12.0)
 
+    def test_sung_from_is_where_singing_began_not_the_count_in(self):
+        song = Song(self.root, "demo")
+        for start_at in (65.0, None):
+            num, path = song.next_path()
+            path.write_bytes(b"RIFF")
+            extra = {"track": "backing - t.wav", "track_start": 63.0}
+            if start_at is not None:
+                extra["start_at"] = start_at
+            song.begin(num, **extra)
+            song.record(num, seconds=1.5, peak_db=-12.0, clipped=False, dropouts=0)
+        new, old = Song(self.root, "demo").takes()
+        self.assertEqual(new.sung_from, 65.0)
+        self.assertEqual(old.sung_from, 63.0)  # recorded before start_at was kept
+
 
 class PolishedCacheTest(unittest.TestCase):
     RATE = 48000
@@ -293,6 +307,18 @@ class ExportTest(unittest.TestCase):
         np.testing.assert_allclose(data[200:300], 0.0, atol=1e-6)
         np.testing.assert_allclose(data[300:], 0.5, atol=1e-6)
         self.assertEqual([p.name for p in out.parent.iterdir()], [out.name])  # no temp left
+
+    def test_prune_export_temps_removes_only_half_written_exports(self):
+        export = self.song.export_dir
+        export.mkdir()
+        kept = export / "demo - keepers (raw).wav"
+        stale = export / ".demo - keepers (raw).tmp.wav"
+        mine = export / "notes.tmp.wav"  # not hidden, so not one of ours
+        for path in (kept, stale, mine):
+            path.write_bytes(b"RIFF")
+        self.assertEqual(self.song.prune_export_temps(), [stale])
+        self.assertEqual(sorted(p.name for p in export.iterdir()), sorted([kept.name, mine.name]))
+        self.assertEqual(Song(self.root, "no exports yet").prune_export_temps(), [])
 
     def test_join_refuses_mixed_sample_rates(self):
         first = self.root / "a.wav"
